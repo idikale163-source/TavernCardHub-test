@@ -76,6 +76,7 @@ function formatFileSize(bytes) {
 
 function switchTab(tab, e) {
     currentTab = tab;
+    currentSelectedTagFilter = 'ALL';
     currentFolderOpened = null;
     const oldInput = document.getElementById('globalDirectFileInput');
     if (oldInput) oldInput.remove();
@@ -455,7 +456,9 @@ async function processFile(file, targetCategory = currentTab) {
                                 if (Array.isArray(row.card_data.categories) && typeof saveStoredCustomCategories === 'function') saveStoredCustomCategories(row.card_data.categories);
                                 continue;
                             }
-                            const asset = { id: row.id, category: row.category, name: row.name, fileType: row.file_type, rawBuffer: buffer, cardData: row.card_data, subCategory: row.card_data?.subCategory || dataObj.subCategory || null, emojiList: row.card_data?.emojiList || dataObj.emojiList || (row.card_data?.data?.emojiList) || null, rawText: row.raw_text, firstMes: dataObj.first_mes || '', alternateGreetings: dataObj.alternate_greetings || [], personality: extractPersonalityDeep(row.card_data || {}), worldbook: dataObj.character_book || (row.category === 'worldbooks' ? row.card_data : null), regexScripts: dataObj.extensions?.regex_scripts || (row.category === 'regex' ? row.card_data : null), createdAt: row.created_at || Date.now() };
+                            const asset = { id: row.id, category: row.category, name: row.name, fileType: row.file_type, rawBuffer: buffer, cardData: row.card_data, subCategory: row.card_data?.subCategory || dataObj.subCategory || null,
+                                    tags: row.card_data?.tags || dataObj.tags || (Array.isArray(row.card_data?.card_data?.tags) ? row.card_data.card_data.tags : []) || null,
+                                    url: row.card_data?.url || dataObj.url || (row.category === 'links' ? row.raw_text?.split('\n')[1] : null) || null, emojiList: row.card_data?.emojiList || dataObj.emojiList || (row.card_data?.data?.emojiList) || null, rawText: row.raw_text, firstMes: dataObj.first_mes || '', alternateGreetings: dataObj.alternate_greetings || [], personality: extractPersonalityDeep(row.card_data || {}), worldbook: dataObj.character_book || (row.category === 'worldbooks' ? row.card_data : null), regexScripts: dataObj.extensions?.regex_scripts || (row.category === 'regex' ? row.card_data : null), createdAt: row.created_at || Date.now() };
 
                             const putTx = db.transaction('assets', 'readwrite');
                             putTx.objectStore('assets').put(asset);
@@ -507,11 +510,11 @@ async function processFile(file, targetCategory = currentTab) {
                 if (asset.emojiList) {
                     cardData.emojiList = asset.emojiList;
                 }
-                if (asset.emojiList) {
-                    cardData.emojiList = asset.emojiList;
+                if (asset.tags && Array.isArray(asset.tags)) {
+                    cardData.tags = asset.tags;
                 }
-                if (asset.emojiList) {
-                    cardData.emojiList = asset.emojiList;
+                if (asset.url) {
+                    cardData.url = asset.url;
                 }
                 const { error } = await supabaseClient.from('tavern_assets').upsert({
                     id: asset.id,
@@ -696,6 +699,8 @@ async function processFile(file, targetCategory = currentTab) {
                                     rawBuffer: buffer,
                                     cardData: row.card_data,
                                     subCategory: row.card_data?.subCategory || dataObj.subCategory || null,
+                                    tags: row.card_data?.tags || dataObj.tags || (Array.isArray(row.card_data?.card_data?.tags) ? row.card_data.card_data.tags : []) || null,
+                                    url: row.card_data?.url || dataObj.url || (row.category === 'links' ? row.raw_text?.split('\n')[1] : null) || null,
                                     emojiList: row.card_data?.emojiList || dataObj.emojiList || (row.card_data?.data?.emojiList) || null,
                                     rawText: row.raw_text,
                                     firstMes: dataObj.first_mes || '',
@@ -979,29 +984,125 @@ async function processFile(file, targetCategory = currentTab) {
 
         function tokTrim(t) { return String(t).trim(); }
 
+        /* ================= 全局标签管理体系 (顶部胶囊栏+卡片+详情页) ================= */
+        let globalTagPressTimer = null;
+        let isGlobalTagLongPress = false;
+
+        window.handleTagTouchStart = function(tag, e) {
+            isGlobalTagLongPress = false;
+            if (globalTagPressTimer) clearTimeout(globalTagPressTimer);
+            globalTagPressTimer = setTimeout(() => {
+                isGlobalTagLongPress = true;
+                promptGlobalTagAction(tag);
+                if (window.navigator && window.navigator.vibrate) {
+                    window.navigator.vibrate(50);
+                }
+            }, 550);
+        };
+
+        window.handleTagTouchEnd = function() {
+            if (globalTagPressTimer) clearTimeout(globalTagPressTimer);
+        };
+
+        window.promptGlobalTagAction = async function(oldTag) {
+            const currentCat = categoryStorageKey(currentTab);
+            const choice = prompt(`【管理分类标签 “${oldTag}”】\n\n1. 输入新名字直接修改\n2. 清空并点击确定则在当前分类彻底删除该标签\n3. 点击取消返回`, oldTag);
+            if (choice === null) return;
+            const trimmed = choice.trim();
+            
+            const assets = await getAllAssets();
+            const categoryAssets = assets.filter(a => a.category === currentCat && a.tags && a.tags.includes(oldTag));
+            
+            if (categoryAssets.length === 0) {
+                showToast('⚠️', '未找到包含该标签的资产');
+                return;
+            }
+
+            if (!trimmed) {
+                // 彻底删除该标签
+                if (!confirm(`确定在当前分类的所有 ${categoryAssets.length} 项资产中彻底删除标签 “${oldTag}” 吗？`)) return;
+                for (let a of categoryAssets) {
+                    a.tags = a.tags.filter(t => t !== oldTag);
+                    await saveAsset(a);
+                }
+                if (currentSelectedTagFilter === oldTag) {
+                    currentSelectedTagFilter = 'ALL';
+                }
+                if (currentItem && currentItem.tags) {
+                    currentItem.tags = currentItem.tags.filter(t => t !== oldTag);
+                    renderOverviewTags();
+                }
+                renderTagFilterBar();
+                renderItems();
+                showToast('🗑️', `已彻底删除标签 “${oldTag}”`);
+            } else if (trimmed !== oldTag) {
+                // 批量重命名该标签
+                for (let a of categoryAssets) {
+                    const idx = a.tags.indexOf(oldTag);
+                    if (idx !== -1) {
+                        a.tags[idx] = trimmed;
+                        a.tags = Array.from(new Set(a.tags));
+                    }
+                    await saveAsset(a);
+                }
+                if (currentSelectedTagFilter === oldTag) {
+                    currentSelectedTagFilter = trimmed;
+                }
+                if (currentItem && currentItem.tags) {
+                    const idx = currentItem.tags.indexOf(oldTag);
+                    if (idx !== -1) currentItem.tags[idx] = trimmed;
+                    renderOverviewTags();
+                }
+                renderTagFilterBar();
+                renderItems();
+                showToast('✏️', `标签已重命名为 “${trimmed}”`);
+            }
+        };
+
         async function promptAddCustomTag() {
             if (!currentItem) return;
-            const newTag = prompt('请输入新标签名字：');
-            if (newTag && newTag.trim()) {
-                const tagStr = newTag.trim();
-                currentItem.tags = currentItem.tags || [];
-                if (!currentItem.tags.includes(tagStr)) {
-                    currentItem.tags.push(tagStr);
-                    await saveAsset(currentItem);
-                    renderOverviewTags();
-                    renderTagFilterBar();
-                    showToast('🏷️', `已成功添加标签 “${tagStr}”`);
-                }
-            }
-        }
-
-        function removeTagFromCurrentItem(tag) {
-            if (!currentItem || !currentItem.tags) return;
-            currentItem.tags = currentItem.tags.filter(t => t !== tag);
-            saveAsset(currentItem);
+            const existingTags = currentItem.tags || [];
+            const tagStr = prompt(`【管理当前资产标签】\n请输入标签（多个标签可用逗号或空格隔开）：`, existingTags.join(', '));
+            if (tagStr === null) return;
+            const newTags = tagStr.split(/[,，\s]+/).map(t => t.trim()).filter(t => t.length > 0);
+            currentItem.tags = Array.from(new Set(newTags));
+            await saveAsset(currentItem);
             renderOverviewTags();
             renderTagFilterBar();
+            renderItems();
+            showToast('🏷️', `标签已更新 (${currentItem.tags.length}个)`);
+        }
+
+        async function removeTagFromCurrentItem(tag) {
+            if (!currentItem || !currentItem.tags) return;
+            currentItem.tags = currentItem.tags.filter(t => t !== tag);
+            await saveAsset(currentItem);
+            renderOverviewTags();
+            renderTagFilterBar();
+            renderItems();
             showToast('🗑️', `已移除标签 “${tag}”`);
+        }
+
+        async function editTagOnCurrentItem(oldTag) {
+            if (!currentItem || !currentItem.tags) return;
+            const newTag = prompt(`修改标签 “${oldTag}” 为：`, oldTag);
+            if (newTag === null) return;
+            const trimmed = newTag.trim();
+            if (!trimmed) {
+                removeTagFromCurrentItem(oldTag);
+                return;
+            }
+            if (trimmed === oldTag) return;
+            
+            const idx = currentItem.tags.indexOf(oldTag);
+            if (idx !== -1) {
+                currentItem.tags[idx] = trimmed;
+                await saveAsset(currentItem);
+                renderOverviewTags();
+                renderTagFilterBar();
+                renderItems();
+                showToast('✏️', `标签已修改为 “${trimmed}”`);
+            }
         }
 
         function renderOverviewTags() {
@@ -1015,8 +1116,11 @@ async function processFile(file, targetCategory = currentTab) {
             }
             tags.forEach(tag => {
                 const pill = document.createElement('span');
-                pill.className = "px-2.5 py-0.5 rounded-full bg-[#f8eeee] border border-[#f2dadc] text-[#b86b7a] text-xs font-semibold flex items-center gap-1";
-                pill.innerHTML = `<span>🏷️ ${tag}</span><button onclick="removeTagFromCurrentItem('${tag}')" class="text-[#a38b8d] hover:text-rose-600 text-[10px] ml-0.5">✕</button>`;
+                pill.className = "px-2.5 py-1 rounded-full bg-[#f8eeee] border border-[#f2dadc] text-[#b86b7a] text-xs font-semibold flex items-center gap-1 shadow-2xs group cursor-pointer";
+                pill.innerHTML = `
+                    <span onclick="editTagOnCurrentItem('${tag}')" title="点击编辑标签">🏷️ ${tag}</span>
+                    <button onclick="event.stopPropagation(); removeTagFromCurrentItem('${tag}')" class="text-[#a38b8d] hover:text-rose-600 font-bold text-xs ml-1" title="删除该标签">✕</button>
+                `;
                 container.appendChild(pill);
             });
         }
@@ -1050,10 +1154,14 @@ async function processFile(file, targetCategory = currentTab) {
             container.appendChild(allBtn);
 
             tagSet.forEach(tag => {
-                const btn = document.createElement('button');
-                btn.onclick = () => filterByTag(tag);
-                btn.className = `px-3 py-1 rounded-full text-[11px] font-bold shrink-0 transition ${currentSelectedTagFilter === tag ? 'bg-[#d88c9a] text-white shadow-sm' : 'bg-[#f5e8e8] text-[#8c7173] hover:bg-[#f8eeee]'}`;
-                btn.innerText = `🏷️ ${tag}`;
+                const btn = document.createElement('div');
+                const isSelected = currentSelectedTagFilter === tag;
+                btn.className = `px-2.5 py-1 rounded-full text-[11px] font-bold shrink-0 transition flex items-center gap-1 cursor-pointer select-none active:scale-95 ${isSelected ? 'bg-[#d88c9a] text-white shadow-sm' : 'bg-[#f5e8e8] text-[#8c7173] hover:bg-[#f8eeee]'}`;
+                
+                btn.innerHTML = `
+                    <span ontouchstart="handleTagTouchStart('${tag}', event)" ontouchend="handleTagTouchEnd()" onclick="if(!isGlobalTagLongPress) filterByTag('${tag}')" title="点击筛选，长按修改/删除">🏷️ ${tag}</span>
+                    <span onclick="event.stopPropagation(); promptGlobalTagAction('${tag}')" class="text-xs ${isSelected ? 'text-white/80 hover:text-white' : 'text-[#a38b8d] hover:text-rose-600'} font-bold ml-0.5 px-0.5" title="管理/删除该标签">✕</span>
+                `;
                 container.appendChild(btn);
             });
         }
@@ -1535,8 +1643,8 @@ if (currentTab === 'docs' || currentTab === 'regex') {
                             <button onclick="navigator.clipboard.writeText('${linkUrl}'); showToast('📋', '链接已复制！');" class="px-3 py-2 rounded-xl bg-[#eff6ff] text-[#475569] hover:bg-[#e2e8f0] text-[11px] font-bold transition">
                                 📋 复制
                             </button>
-                            <button onclick="event.stopPropagation(); currentItem = item; promptAddCustomTag();" class="px-3 py-2 rounded-xl bg-[#fdf4f5] text-[#b86b7a] hover:bg-[#f8eeee] text-[11px] font-bold transition">
-                                🏷️ 标签
+                            <button onclick="promptManageAssetTags('${item.id}', event)" class="px-3 py-2 rounded-xl bg-[#fdf4f5] text-[#b86b7a] hover:bg-[#f8eeee] text-[11px] font-bold transition flex items-center gap-1">
+                                🏷️ 标签${item.tags && item.tags.length > 0 ? ` (${item.tags.length})` : ''}
                             </button>
                             <button onclick="deleteSingleAsset('${item.id}', event)" class="px-3 py-2 rounded-xl bg-[#fff1f2] text-[#ef4444] hover:bg-[#fee2e2] text-[11px] font-bold transition">
                                 🗑️
@@ -1551,7 +1659,16 @@ if (currentTab === 'docs' || currentTab === 'regex') {
                             <img src="${imgUrl}" class="w-full h-full object-cover rounded-lg" onerror="this.src='https://placehold.co/300x400/fdf4f5/d88c9a?text=图片加载失败'">
                         </div>
                         <div>
-                            <h3 class="font-bold text-xs text-[#4a3e3d] text-center truncate px-0.5">${item.name}</h3>${item.tags && item.tags.length > 0 ? `<div class="flex items-center justify-center gap-1 flex-wrap pt-0.5">${item.tags.slice(0, 2).map(t => `<span class="text-[9px] px-1.5 py-0.2 rounded bg-[#f8eeee] text-[#b86b7a] font-medium">🏷️ ${t}</span>`).join('')}</div>` : ''}
+                            <h3 class="font-bold text-xs text-[#4a3e3d] text-center truncate px-0.5">${item.name}</h3>
+                            ${item.tags && item.tags.length > 0 ? `
+                                <div class="flex items-center justify-center gap-1 flex-wrap pt-1">
+                                    ${item.tags.map(t => `
+                                        <span ontouchstart="handleGalleryTagTouchStart('${t}', '${item.id}', event)" ontouchend="handleGalleryTagTouchEnd('${t}', '${item.id}', event)" onclick="handleGalleryTagClick('${t}', '${item.id}', event)" class="text-[10px] px-2 py-0.5 rounded-full bg-[#f8eeee] text-[#b86b7a] font-medium border border-[#f2dadc] active:scale-95 cursor-pointer select-none" title="长按复制，点击编辑/删除">
+                                            🏷️ ${t}
+                                        </span>
+                                    `).join('')}
+                                </div>
+                            ` : ''}
                         </div>
                     `;
                 } else if (currentTab === 'sandbox' || item.category === 'sandbox') {
@@ -1761,8 +1878,11 @@ if (currentTab === 'docs' || currentTab === 'regex') {
                                 </button>
                             </div>
                             <div class="text-sm font-bold text-[#4a3e3d] truncate pt-1">${item.name}</div>
+                            
+
+
                             <div class="flex justify-center py-2">
-                                <img src="${imgUrl}" class="max-w-full rounded-2xl shadow-md border border-[#f5e1e3] max-h-[65vh] object-contain">
+                                <img src="${imgUrl}" class="max-w-full rounded-2xl shadow-md border border-[#f5e1e3] max-h-[60vh] object-contain">
                             </div>
                             <div class="grid grid-cols-2 gap-2.5 pt-2">
                                 <button type="button" onclick="downloadGalleryImage(currentItem);" class="w-full py-2.5 rounded-xl bg-[#d88c9a] text-white font-bold text-xs shadow-xs hover:bg-[#c97b8b] transition">
@@ -2195,7 +2315,19 @@ if (currentTab === 'docs' || currentTab === 'regex') {
             }
         }
 
-        function copyText(id) { const text = document.getElementById(id)?.innerText; if (text) { navigator.clipboard.writeText(text); showToast('📋', '文本已复制！'); } }
+        function copyText(id) {
+            const el = document.getElementById(id) || document.getElementById('docFullContentTextarea');
+            const text = el ? (el.value !== undefined ? el.value : el.innerText) : '';
+            if (text) {
+                navigator.clipboard.writeText(text).then(() => {
+                    showToast('📋', '全文人设/文档已成功复制到剪贴板！');
+                }).catch(() => {
+                    if (el && el.select) { el.select(); document.execCommand('copy'); showToast('📋', '已复制！'); }
+                });
+            } else {
+                showToast('⚠️', '暂无内容可复制');
+            }
+        }
 
         // Register PWA Service Worker (不主动卸载，保持 PWA 可安装)
         if ('serviceWorker' in navigator) {
@@ -2819,15 +2951,25 @@ async function saveNewLinkAsset() {
     showToast('🔗', `已成功添加网址链接 “${title}”！`);
 }
 
-function openLinkInDefaultBrowser(url) {
-    if (!url) return;
-    if (window.AndroidApp && typeof window.AndroidApp.openExternalBrowser === 'function') {
-        try {
+function openLinkInDefaultBrowser(url, e) {
+    if (e && e.stopPropagation) e.stopPropagation();
+    if (e && e.preventDefault) e.preventDefault();
+    if (!url || url === '#') return;
+    try {
+        if (window.AndroidApp && typeof window.AndroidApp.openExternalBrowser === 'function') {
             window.AndroidApp.openExternalBrowser(url);
             return;
-        } catch(e) { console.error('Android bridge openExternalBrowser failed', e); }
-    }
-    window.open(url, '_blank', 'noopener,noreferrer');
+        }
+    } catch(err) { console.error('AndroidApp bridge failed', err); }
+    
+    // 强制触发原生外链在新标签页/系统浏览器打开
+    const a = document.createElement('a');
+    a.href = url;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
 }
 
 async function deleteSingleAsset(id, e) {
@@ -3470,3 +3612,156 @@ async function downloadGalleryImage(item) {
     }
 }
 window.downloadGalleryImage = downloadGalleryImage;
+
+/* ================= 独立唤起表情包命名工坊 ================= */
+window.openEmojiNamerModal = function(e) {
+    if (e && e.stopPropagation) e.stopPropagation();
+    if (e && e.preventDefault) e.preventDefault();
+    if (typeof toggleSidebar === 'function') toggleSidebar();
+
+    const container = document.getElementById('emojiNamerIframeContainer');
+    const frame = document.getElementById('emojiNamerFrame');
+    if (container && frame) {
+        if (frame.src === 'about:blank' || !frame.src) {
+            frame.src = 'https://idikale163-source.github.io/emoji-namer/';
+        }
+        container.style.display = 'flex';
+        initNamerFloatingBtnDrag();
+    }
+};
+
+window.closeEmojiNamerModal = function() {
+    const container = document.getElementById('emojiNamerIframeContainer');
+    if (container) {
+        container.style.display = 'none';
+    }
+};
+
+function initNamerFloatingBtnDrag() {
+    const btn = document.getElementById('namerFloatingBackBtn');
+    if (!btn || btn.dataset.dragInited) return;
+    btn.dataset.dragInited = 'true';
+
+    let isDragging = false;
+    let startX, startY, initialLeft, initialTop;
+    let hasMoved = false;
+
+    btn.addEventListener('touchstart', function(e) {
+        const touch = e.touches[0];
+        isDragging = true;
+        hasMoved = false;
+        startX = touch.clientX;
+        startY = touch.clientY;
+        const rect = btn.getBoundingClientRect();
+        initialLeft = rect.left;
+        initialTop = rect.top;
+    }, { passive: true });
+
+    window.addEventListener('touchmove', function(e) {
+        if (!isDragging) return;
+        const touch = e.touches[0];
+        const dx = touch.clientX - startX;
+        const dy = touch.clientY - startY;
+        if (Math.abs(dx) > 4 || Math.abs(dy) > 4) hasMoved = true;
+        let newX = initialLeft + dx;
+        let newY = initialTop + dy;
+        newX = Math.max(8, Math.min(window.innerWidth - btn.offsetWidth - 8, newX));
+        newY = Math.max(8, Math.min(window.innerHeight - btn.offsetHeight - 8, newY));
+        btn.style.left = newX + 'px';
+        btn.style.top = newY + 'px';
+    }, { passive: true });
+
+    window.addEventListener('touchend', function() { isDragging = false; });
+}
+
+
+/* ================= 图库标签交互增强 (长按复制/点击编辑/删除) ================= */
+let galleryTagPressTimer = null;
+let isGalleryTagLongPress = false;
+
+window.handleGalleryTagTouchStart = function(tag, assetId, e) {
+    isGalleryTagLongPress = false;
+    if (galleryTagPressTimer) clearTimeout(galleryTagPressTimer);
+    galleryTagPressTimer = setTimeout(() => {
+        isGalleryTagLongPress = true;
+        navigator.clipboard.writeText(tag).then(() => {
+            showToast('📋', `已复制标签: “${tag}”`);
+        }).catch(() => {
+            showToast('📋', `标签: ${tag}`);
+        });
+        if (window.navigator && window.navigator.vibrate) {
+            window.navigator.vibrate(50);
+        }
+    }, 500);
+};
+
+window.handleGalleryTagTouchEnd = function(tag, assetId, e) {
+    if (galleryTagPressTimer) clearTimeout(galleryTagPressTimer);
+};
+
+window.handleGalleryTagClick = function(tag, assetId, e) {
+    if (e && e.stopPropagation) e.stopPropagation();
+    if (e && e.preventDefault) e.preventDefault();
+    if (isGalleryTagLongPress) {
+        isGalleryTagLongPress = false;
+        return;
+    }
+    // 弹窗询问：编辑、删除还是复制
+    const choice = prompt(`标签【${tag}】操作：\n1. 输入新名字直接修改\n2. 留空确定则删除该标签\n3. 点击取消返回`, tag);
+    if (choice === null) return;
+    const trimmed = choice.trim();
+    if (!trimmed) {
+        removeGalleryTagDirect(tag, assetId);
+    } else if (trimmed !== tag) {
+        editGalleryTagDirect(tag, trimmed, assetId);
+    }
+};
+
+async function editGalleryTagDirect(oldTag, newTag, assetId) {
+    const assets = await getAllAssets();
+    const target = assetId ? assets.find(a => a.id === assetId) : currentItem;
+    if (!target || !target.tags) return;
+    const idx = target.tags.indexOf(oldTag);
+    if (idx !== -1) {
+        target.tags[idx] = newTag;
+        await saveAsset(target);
+        if (currentItem && currentItem.id === target.id) {
+            currentItem = target;
+            renderGalleryDetailTags();
+        }
+        renderTagFilterBar();
+        renderItems();
+        showToast('✏️', `标签已更新为 “${newTag}”`);
+    }
+}
+
+async function removeGalleryTagDirect(tag, assetId) {
+    const assets = await getAllAssets();
+    const target = assetId ? assets.find(a => a.id === assetId) : currentItem;
+    if (!target || !target.tags) return;
+    target.tags = target.tags.filter(t => t !== tag);
+    await saveAsset(target);
+    if (currentItem && currentItem.id === target.id) {
+        currentItem = target;
+        renderGalleryDetailTags();
+    }
+    renderTagFilterBar();
+    renderItems();
+    showToast('🗑️', `已删除标签 “${tag}”`);
+}
+
+window.renderGalleryDetailTags = function() {
+    const box = document.getElementById('galleryDetailTagsContainer');
+    if (!box || !currentItem) return;
+    const tags = currentItem.tags || [];
+    if (tags.length === 0) {
+        box.innerHTML = `<span class="text-xs text-[#a38b8d] italic">暂无标签</span>`;
+        return;
+    }
+    box.innerHTML = tags.map(t => `
+        <span ontouchstart="handleGalleryTagTouchStart('${t}', '${currentItem.id}', event)" ontouchend="handleGalleryTagTouchEnd('${t}', '${currentItem.id}', event)" onclick="handleGalleryTagClick('${t}', '${currentItem.id}', event)" class="px-2.5 py-1 rounded-full bg-[#f8eeee] border border-[#f2dadc] text-[#b86b7a] text-xs font-semibold flex items-center gap-1 shadow-2xs cursor-pointer select-none active:scale-95 transition" title="长按复制，点击编辑/删除">
+            🏷️ ${t}
+            <span onclick="event.stopPropagation(); removeGalleryTagDirect('${t}', '${currentItem.id}')" class="text-[#a38b8d] hover:text-rose-600 font-bold ml-0.5 text-xs">✕</span>
+        </span>
+    `).join('');
+};
