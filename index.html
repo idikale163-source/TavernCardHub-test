@@ -1,4 +1,4 @@
-<!-- BUILD_VER_STAMP: 1787281974 -->
+<!-- BUILD_VER_STAMP: 1787302277 -->
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -303,6 +303,11 @@
                         <button onclick="manualIncrementalSync()" class="px-2 py-1 rounded-lg bg-[#f8eeee] text-[#b86b7a] text-[10px] font-semibold hover:bg-[#f5e1e3] transition">⚡ 增量同步</button>
                         <button onclick="restoreFromCloudIncremental()" class="px-2 py-1 rounded-lg bg-[#e8f3ef] text-[#5b8a7f] text-[10px] font-semibold hover:bg-[#d8ebe5] transition">🔄 增量恢复</button>
                     </div>
+                    <div class="flex items-center justify-between gap-1.5 pt-0.5">
+                        <button onclick="exportAssetsAsZip()" class="px-2 py-1 rounded-lg bg-[#f0e8f5] text-[#7a5b8a] text-[10px] font-semibold hover:bg-[#e8d8f0] transition flex-1">📦 导出ZIP备份</button>
+                        <button onclick="importAssetsFromZip()" class="px-2 py-1 rounded-lg bg-[#f0e8f5] text-[#7a5b8a] text-[10px] font-semibold hover:bg-[#e8d8f0] transition flex-1">📥 从ZIP导入</button>
+                    </div>
+                    <input type="file" id="zipImportInput" accept=".zip" style="display:none">
                     <div class="flex items-center justify-between gap-1.5 pt-0.5">
                         <button onclick="forceOverwriteBackupCloud()" class="px-2 py-1 rounded-lg bg-rose-50 border border-rose-200 text-rose-600 text-[10px] font-semibold hover:bg-rose-100 transition flex-1">💥 覆盖云端备份</button>
                         <button onclick="forceOverwriteRestoreLocal()" class="px-2 py-1 rounded-lg bg-rose-50 border border-rose-200 text-rose-600 text-[10px] font-semibold hover:bg-rose-100 transition flex-1">⚠️ 覆盖恢复本地</button>
@@ -859,7 +864,8 @@
     <script src="assets/js/core.js?v=1786377509"></script>
     <script src="assets/js/sync.js?v=1786377509"></script>
     <script src="assets/js/apikeys.js?v=1786377509"></script>
-    <script src="assets/js/ui.js?v=1787281974"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+    <script src="assets/js/ui.js?v=1787302277"></script>
     <script src="assets/js/links.js?v=1786377509"></script>
     <script src="assets/js/font.js?v=1786377509"></script>
     <script src="assets/js/sandbox.js?v=1787168888888"></script>
@@ -872,6 +878,12 @@
             <span>返回资源合集</span>
         </div>
         <iframe id="emojiNamerFrame" class="w-full h-full border-none flex-1" src="about:blank"></iframe>
+    </div>
+
+
+    <!-- 内部全屏网页浏览沙盒 (无悬浮按钮，手机自带返回键退回) -->
+    <div id="internalBrowserModal" class="fixed inset-0 z-[1000] bg-white flex flex-col overflow-hidden" style="display: none;">
+        <iframe id="internalBrowserFrame" class="w-full h-full border-none flex-1 bg-white" src="about:blank" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>
     </div>
 
 </body>
