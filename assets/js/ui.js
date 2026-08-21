@@ -336,20 +336,11 @@ async function processFile(file, targetCategory = currentTab) {
             if (item.cover instanceof Blob || item.cover instanceof File) {
                 return URL.createObjectURL(item.cover);
             }
-            if (item.cover_base64 && typeof item.cover_base64 === 'string') {
-                return item.cover_base64;
-            }
             if (item.rawBuffer instanceof ArrayBuffer) {
                 const blob = new Blob([item.rawBuffer], { type: item.fileType || 'image/png' });
                 return URL.createObjectURL(blob);
             }
-            if (item.cardData && item.cardData.cover_base64) {
-                return item.cardData.cover_base64;
-            }
-            if (item.cardData && item.cardData.data && item.cardData.data.image) {
-                return item.cardData.data.image;
-            }
-            if (item.url && item.category !== 'links') return item.url;
+            if (item.url) return item.url;
             return item.cover || item.rawText || '';
         }
 
@@ -510,9 +501,6 @@ async function processFile(file, targetCategory = currentTab) {
                     const bytes = new Uint8Array(asset.rawBuffer); let binary = '';
                     for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
                     base64Buf = btoa(binary);
-                } else if (asset.cover_base64 && typeof asset.cover_base64 === 'string') {
-                    const m = asset.cover_base64.match(/^data:[^;]+;base64,(.+)$/);
-                    if (m) base64Buf = m[1];
                 }
                 // 关键修复:把 subCategory 和 card_data 一起塞进 upsert
                 const cardData = asset.cardData || {};
@@ -527,9 +515,6 @@ async function processFile(file, targetCategory = currentTab) {
                 }
                 if (asset.url) {
                     cardData.url = asset.url;
-                }
-                if (asset.cover_base64 && typeof asset.cover_base64 === 'string') {
-                    cardData.cover_base64 = asset.cover_base64;
                 }
                 const { error } = await supabaseClient.from('tavern_assets').upsert({
                     id: asset.id,
