@@ -3676,6 +3676,67 @@ window.closeBubbleGenModal = function() {
     }
 };
 
+/* ================= 独立唤起图床 (tuchuang) ================= */
+window.openTuchuangModal = function(e) {
+    if (e && e.stopPropagation) e.stopPropagation();
+    if (e && e.preventDefault) e.preventDefault();
+    if (typeof toggleSidebar === 'function') toggleSidebar();
+
+    const container = document.getElementById('tuchuangIframeContainer');
+    const frame = document.getElementById('tuchuangFrame');
+    if (container && frame) {
+        if (frame.src === 'about:blank' || !frame.src) {
+            frame.src = 'tools/tuchuang.html';
+        }
+        container.style.display = 'flex';
+        initTuchuangFloatingBtnDrag();
+    }
+};
+
+window.closeTuchuangModal = function() {
+    const container = document.getElementById('tuchuangIframeContainer');
+    if (container) {
+        container.style.display = 'none';
+    }
+};
+
+function initTuchuangFloatingBtnDrag() {
+    const btn = document.getElementById('tuchuangFloatingBackBtn');
+    if (!btn || btn.dataset.dragInited) return;
+    btn.dataset.dragInited = 'true';
+
+    let isDragging = false;
+    let startX, startY, initialLeft, initialTop;
+    let hasMoved = false;
+
+    btn.addEventListener('touchstart', function(e) {
+        const touch = e.touches[0];
+        isDragging = true;
+        hasMoved = false;
+        startX = touch.clientX;
+        startY = touch.clientY;
+        const rect = btn.getBoundingClientRect();
+        initialLeft = rect.left;
+        initialTop = rect.top;
+    }, { passive: true });
+
+    window.addEventListener('touchmove', function(e) {
+        if (!isDragging) return;
+        const touch = e.touches[0];
+        const dx = touch.clientX - startX;
+        const dy = touch.clientY - startY;
+        if (Math.abs(dx) > 4 || Math.abs(dy) > 4) hasMoved = true;
+        let newX = initialLeft + dx;
+        let newY = initialTop + dy;
+        newX = Math.max(8, Math.min(window.innerWidth - btn.offsetWidth - 8, newX));
+        newY = Math.max(8, Math.min(window.innerHeight - btn.offsetHeight - 8, newY));
+        btn.style.left = newX + 'px';
+        btn.style.top = newY + 'px';
+    }, { passive: true });
+
+    window.addEventListener('touchend', function() { isDragging = false; });
+}
+
 function initBubbleGenFloatingBtnDrag() {
     const btn = document.getElementById('bubbleGenFloatingBackBtn');
     if (!btn || btn.dataset.dragInited) return;
