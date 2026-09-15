@@ -4320,8 +4320,10 @@ window.openCharacterV2Modal = function(e) {
     const container = document.getElementById('characterV2IframeContainer');
     const frame = document.getElementById('characterV2Frame');
     if (container && frame) {
-        if (frame.src === 'about:blank' || !frame.src || frame.src.endsWith('about:blank')) {
-            frame.src = 'tools/character-v2/index.html';
+        // 强制刷新并附带时间戳，杜绝任何历史缓存与空白挂死
+        const targetUrl = window.location.origin + '/tools/character-v2/index.html?t=' + Date.now();
+        if (frame.src !== targetUrl) {
+            frame.src = targetUrl;
         }
         container.style.display = 'flex';
         initCharacterV2FloatingBtnDrag();
