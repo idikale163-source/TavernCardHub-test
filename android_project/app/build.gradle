@@ -10,8 +10,8 @@ android {
         applicationId "com.operit.resourcehub"
         minSdk 24
         targetSdk 34
-        versionCode 9999
-        versionName "9.9.9"
+        versionCode 100001
+        versionName "3.7.0"
     }
 
     buildTypes {
