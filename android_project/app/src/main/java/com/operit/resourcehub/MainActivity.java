@@ -38,7 +38,7 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        // 1. 全屏沉浸式无黑条
+        // 1. 无黑条全屏沉浸
         requestWindowFeature(Window.FEATURE_NO_TITLE);
         Window window = getWindow();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
@@ -67,6 +67,7 @@ public class MainActivity extends Activity {
         settings.setUseWideViewPort(true);
         settings.setMediaPlaybackRequiresUserGesture(false);
 
+        // 关键：全面放开大文件/WASM/Web Worker及跨域协议访问（解决 ISO/7z 在 WebView 下加载 wasm 失败的问题）
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
             CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true);
@@ -74,23 +75,28 @@ public class MainActivity extends Activity {
         settings.setAllowUniversalAccessFromFileURLs(true);
         settings.setAllowFileAccessFromFileURLs(true);
 
-        // 注入核心导出/备份桥接 AndroidApp
+        // 注入安卓导出桥接（同时支持 (base64, filename, mime) 与 (filename, base64, mime) 双向兼容参数顺序！）
         webView.addJavascriptInterface(new WebAppInterface(this), "AndroidApp");
 
         webView.setWebViewClient(new WebViewClient());
         webView.setWebChromeClient(new WebChromeClient() {
             @Override
-            public boolean onShowFileChooser(WebView wv, ValueCallback<Uri[]> filePathCallback, FileChooserParams fileChooserParams) {
-                if (MainActivity.this.filePathCallback != null) {
-                    MainActivity.this.filePathCallback.onReceiveValue(null);
+            public boolean onShowFileChooser(WebView wv, ValueCallback<Uri[]> callback, FileChooserParams params) {
+                if (filePathCallback != null) {
+                    filePathCallback.onReceiveValue(null);
                 }
-                MainActivity.this.filePathCallback = filePathCallback;
+                filePathCallback = callback;
 
-                Intent intent = fileChooserParams.createIntent();
+                Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
+                intent.addCategory(Intent.CATEGORY_OPENABLE);
+                // 允许选取所有类型的文件（包含 .iso, .7z, .rar, .zip, .png, .json 等）
+                intent.setType("*/*");
+                intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+
                 try {
-                    startActivityForResult(intent, FILE_CHOOSER_REQUEST_CODE);
+                    startActivityForResult(Intent.createChooser(intent, "选择导入文件 (支持 ISO / 压缩包 / 角色卡)"), FILE_CHOOSER_REQUEST_CODE);
                 } catch (Exception e) {
-                    MainActivity.this.filePathCallback = null;
+                    filePathCallback = null;
                     return false;
                 }
                 return true;
@@ -100,7 +106,6 @@ public class MainActivity extends Activity {
         webView.loadUrl("file:///android_asset/index.html");
     }
 
-    // 核心原生导出桥接类
     public class WebAppInterface {
         Context mContext;
 
@@ -108,10 +113,32 @@ public class MainActivity extends Activity {
             mContext = c;
         }
 
+        // 核心双重重载：彻底杜绝前端参数顺序传反（arg0/arg1 智能识别哪个是文件名，哪个是 base64 数据）
         @JavascriptInterface
-        public void saveBase64File(String base64Data, String filename, String mimeType) {
+        public void saveBase64File(String arg1, String arg2, String arg3) {
+            String filename = "ResourceHub_Backup.zip";
+            String base64Data = "";
+            String mimeType = "application/octet-stream";
+
+            if (arg1 != null && arg1.length() > 200) {
+                base64Data = arg1;
+                filename = (arg2 != null && !arg2.isEmpty()) ? arg2 : filename;
+                mimeType = (arg3 != null && !arg3.isEmpty()) ? arg3 : mimeType;
+            } else if (arg2 != null && arg2.length() > 200) {
+                base64Data = arg2;
+                filename = (arg1 != null && !arg1.isEmpty()) ? arg1 : filename;
+                mimeType = (arg3 != null && !arg3.isEmpty()) ? arg3 : mimeType;
+            } else {
+                base64Data = (arg1 != null) ? arg1 : "";
+                filename = (arg2 != null) ? arg2 : filename;
+                mimeType = (arg3 != null) ? arg3 : mimeType;
+            }
+
+            performSave(base64Data, filename, mimeType);
+        }
+
+        private void performSave(String base64Data, String filename, String mimeType) {
             try {
-                // 清理 base64 前缀
                 String cleanBase64 = base64Data;
                 if (cleanBase64.contains(",")) {
                     cleanBase64 = cleanBase64.substring(cleanBase64.indexOf(",") + 1);
@@ -120,7 +147,7 @@ public class MainActivity extends Activity {
 
                 boolean success = false;
 
-                // Android 10+ (API 29+) 采用 MediaStore 写入公有 Download 目录
+                // Android 10+ (API 29+) MediaStore
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     ContentValues values = new ContentValues();
                     values.put(MediaStore.Downloads.DISPLAY_NAME, filename);
@@ -138,7 +165,6 @@ public class MainActivity extends Activity {
                         }
                     }
                 } else {
-                    // Android 9 及以下直接写入 /sdcard/Download
                     File downloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
                     if (!downloadDir.exists()) downloadDir.mkdirs();
                     File outFile = new File(downloadDir, filename);
@@ -150,16 +176,17 @@ public class MainActivity extends Activity {
                 }
 
                 final boolean finalSuccess = success;
+                final String finalFilename = filename;
                 runOnUiThread(() -> {
                     if (finalSuccess) {
-                        Toast.makeText(mContext, "导出成功！已保存到系统 Download 目录: " + filename, Toast.LENGTH_LONG).show();
+                        Toast.makeText(mContext, "✅ 导出成功！已保存到 Download: " + finalFilename, Toast.LENGTH_LONG).show();
                     } else {
-                        Toast.makeText(mContext, "导出写入失败，请检查存储权限", Toast.LENGTH_SHORT).show();
+                        Toast.makeText(mContext, "❌ 导出写入失败，请检查存储权限", Toast.LENGTH_SHORT).show();
                     }
                 });
 
             } catch (Exception e) {
-                runOnUiThread(() -> Toast.makeText(mContext, "导出异常: " + e.getMessage(), Toast.LENGTH_SHORT).show());
+                runOnUiThread(() -> Toast.makeText(mContext, "⚠️ 导出异常: " + e.getMessage(), Toast.LENGTH_SHORT).show());
             }
         }
     }
@@ -169,6 +196,9 @@ public class MainActivity extends Activity {
         if (requestCode == FILE_CHOOSER_REQUEST_CODE) {
             if (filePathCallback != null) {
                 Uri[] results = WebChromeClient.FileChooserParams.parseResult(resultCode, data);
+                if (results == null && data != null && data.getData() != null) {
+                    results = new Uri[]{data.getData()};
+                }
                 filePathCallback.onReceiveValue(results);
                 filePathCallback = null;
             }
