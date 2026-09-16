@@ -4,57 +4,51 @@ import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.ContentValues;
 import android.content.Context;
-import android.content.Intent;
-import android.graphics.Color;
+import android.media.MediaScannerConnection;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.MediaStore;
 import android.util.Base64;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowManager;
-import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
-import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Toast;
-
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.OutputStream;
 
 public class MainActivity extends Activity {
     private WebView webView;
-    private ValueCallback<Uri[]> filePathCallback;
-    private static final int FILE_CHOOSER_REQUEST_CODE = 1001;
 
-    @SuppressLint("SetJavaScriptEnabled")
     @Override
+    @SuppressLint("SetJavaScriptEnabled")
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        // 1. 无黑条全屏沉浸
+        // 全屏沉浸式无黑条
         requestWindowFeature(Window.FEATURE_NO_TITLE);
         Window window = getWindow();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            window.clearFlags(WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS | WindowManager.LayoutParams.FLAG_TRANSLUCENT_NAVIGATION);
+            window.clearFlags(WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS);
             window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
+            window.setStatusBarColor(0x00000000);
             window.getDecorView().setSystemUiVisibility(
-                View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE |
+                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN |
+                View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
             );
-            window.setStatusBarColor(Color.TRANSPARENT);
-            window.setNavigationBarColor(Color.TRANSPARENT);
         }
 
         webView = new WebView(this);
-        webView.setFitsSystemWindows(false);
         setContentView(webView);
 
         WebSettings settings = webView.getSettings();
@@ -63,147 +57,175 @@ public class MainActivity extends Activity {
         settings.setDatabaseEnabled(true);
         settings.setAllowFileAccess(true);
         settings.setAllowContentAccess(true);
-        settings.setLoadWithOverviewMode(true);
-        settings.setUseWideViewPort(true);
-        settings.setMediaPlaybackRequiresUserGesture(false);
-
-        // 关键：全面放开大文件/WASM/Web Worker及跨域协议访问（解决 ISO/7z 在 WebView 下加载 wasm 失败的问题）
+        settings.setAllowFileAccessFromFileURLs(true);
+        settings.setAllowUniversalAccessFromFileURLs(true);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
-            CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true);
         }
-        settings.setAllowUniversalAccessFromFileURLs(true);
-        settings.setAllowFileAccessFromFileURLs(true);
+        settings.setCacheMode(WebSettings.LOAD_NO_CACHE);
 
-        // 注入安卓导出桥接（同时支持 (base64, filename, mime) 与 (filename, base64, mime) 双向兼容参数顺序！）
-        webView.addJavascriptInterface(new WebAppInterface(this), "AndroidApp");
+        WebAppInterface bridge = new WebAppInterface(this);
+        webView.addJavascriptInterface(bridge, "AndroidApp");
+        webView.addJavascriptInterface(bridge, "AndroidDownload");
 
+        webView.setWebChromeClient(new WebChromeClient());
         webView.setWebViewClient(new WebViewClient());
-        webView.setWebChromeClient(new WebChromeClient() {
-            @Override
-            public boolean onShowFileChooser(WebView wv, ValueCallback<Uri[]> callback, FileChooserParams params) {
-                if (filePathCallback != null) {
-                    filePathCallback.onReceiveValue(null);
-                }
-                filePathCallback = callback;
-
-                Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
-                intent.addCategory(Intent.CATEGORY_OPENABLE);
-                // 允许选取所有类型的文件（包含 .iso, .7z, .rar, .zip, .png, .json 等）
-                intent.setType("*/*");
-                intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
-
-                try {
-                    startActivityForResult(Intent.createChooser(intent, "选择导入文件 (支持 ISO / 压缩包 / 角色卡)"), FILE_CHOOSER_REQUEST_CODE);
-                } catch (Exception e) {
-                    filePathCallback = null;
-                    return false;
-                }
-                return true;
-            }
-        });
-
         webView.loadUrl("file:///android_asset/index.html");
     }
 
-    public class WebAppInterface {
-        Context mContext;
+    public static class WebAppInterface {
+        private final Context context;
+        private File currentTempFile = null;
+        private FileOutputStream currentFos = null;
 
-        WebAppInterface(Context c) {
-            mContext = c;
+        public WebAppInterface(Context context) {
+            this.context = context;
         }
 
-        // 核心双重重载：彻底杜绝前端参数顺序传反（arg0/arg1 智能识别哪个是文件名，哪个是 base64 数据）
+        // ==================== 256KB 分片流式写入核心接口 ====================
         @JavascriptInterface
-        public void saveBase64File(String arg1, String arg2, String arg3) {
-            String filename = "ResourceHub_Backup.zip";
-            String base64Data = "";
-            String mimeType = "application/octet-stream";
-
-            if (arg1 != null && arg1.length() > 200) {
-                base64Data = arg1;
-                filename = (arg2 != null && !arg2.isEmpty()) ? arg2 : filename;
-                mimeType = (arg3 != null && !arg3.isEmpty()) ? arg3 : mimeType;
-            } else if (arg2 != null && arg2.length() > 200) {
-                base64Data = arg2;
-                filename = (arg1 != null && !arg1.isEmpty()) ? arg1 : filename;
-                mimeType = (arg3 != null && !arg3.isEmpty()) ? arg3 : mimeType;
-            } else {
-                base64Data = (arg1 != null) ? arg1 : "";
-                filename = (arg2 != null) ? arg2 : filename;
-                mimeType = (arg3 != null) ? arg3 : mimeType;
-            }
-
-            performSave(base64Data, filename, mimeType);
-        }
-
-        private void performSave(String base64Data, String filename, String mimeType) {
+        public synchronized boolean writeChunk(String chunkBase64, boolean isFirstChunk, boolean isLastChunk, String filename) {
             try {
-                String cleanBase64 = base64Data;
-                if (cleanBase64.contains(",")) {
-                    cleanBase64 = cleanBase64.substring(cleanBase64.indexOf(",") + 1);
-                }
-                byte[] fileBytes = Base64.decode(cleanBase64, Base64.DEFAULT);
-
-                boolean success = false;
-
-                // Android 10+ (API 29+) MediaStore
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    ContentValues values = new ContentValues();
-                    values.put(MediaStore.Downloads.DISPLAY_NAME, filename);
-                    values.put(MediaStore.Downloads.MIME_TYPE, mimeType);
-                    values.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
-
-                    Uri uri = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
-                    if (uri != null) {
-                        try (OutputStream os = getContentResolver().openOutputStream(uri)) {
-                            if (os != null) {
-                                os.write(fileBytes);
-                                os.flush();
-                                success = true;
-                            }
-                        }
+                if (isFirstChunk) {
+                    if (currentFos != null) {
+                        try { currentFos.close(); } catch (Exception ignored) {}
                     }
-                } else {
-                    File downloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
-                    if (!downloadDir.exists()) downloadDir.mkdirs();
-                    File outFile = new File(downloadDir, filename);
-                    try (FileOutputStream fos = new FileOutputStream(outFile)) {
-                        fos.write(fileBytes);
-                        fos.flush();
-                        success = true;
+                    File cacheDir = context.getCacheDir();
+                    currentTempFile = new File(cacheDir, "export_temp_" + System.currentTimeMillis() + ".tmp");
+                    if (currentTempFile.exists()) currentTempFile.delete();
+                    currentFos = new FileOutputStream(currentTempFile, true);
+                }
+
+                if (chunkBase64 != null && !chunkBase64.isEmpty()) {
+                    String clean = chunkBase64.contains(",") ? chunkBase64.substring(chunkBase64.indexOf(",") + 1) : chunkBase64;
+                    byte[] bytes = Base64.decode(clean, Base64.DEFAULT);
+                    if (currentFos != null) {
+                        currentFos.write(bytes);
+                        currentFos.flush();
                     }
                 }
 
-                final boolean finalSuccess = success;
-                final String finalFilename = filename;
-                runOnUiThread(() -> {
-                    if (finalSuccess) {
-                        Toast.makeText(mContext, "✅ 导出成功！已保存到 Download: " + finalFilename, Toast.LENGTH_LONG).show();
-                    } else {
-                        Toast.makeText(mContext, "❌ 导出写入失败，请检查存储权限", Toast.LENGTH_SHORT).show();
+                if (isLastChunk) {
+                    if (currentFos != null) {
+                        currentFos.close();
+                        currentFos = null;
                     }
-                });
-
+                    if (currentTempFile != null && currentTempFile.exists()) {
+                        String outName = (filename != null && !filename.isEmpty()) ? filename : ("ResourceHub_Backup_" + System.currentTimeMillis() + ".zip");
+                        saveFileToPublicDownload(currentTempFile, outName, "application/zip");
+                        currentTempFile.delete();
+                        currentTempFile = null;
+                        postToast("🎉 备份已成功写入：Download/" + outName);
+                    }
+                }
+                return true;
             } catch (Exception e) {
-                runOnUiThread(() -> Toast.makeText(mContext, "⚠️ 导出异常: " + e.getMessage(), Toast.LENGTH_SHORT).show());
+                postToast("❌ 写入分片失败: " + e.getMessage());
+                if (currentFos != null) {
+                    try { currentFos.close(); } catch (Exception ignored) {}
+                    currentFos = null;
+                }
+                return false;
             }
         }
-    }
 
-    @Override
-    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        if (requestCode == FILE_CHOOSER_REQUEST_CODE) {
-            if (filePathCallback != null) {
-                Uri[] results = WebChromeClient.FileChooserParams.parseResult(resultCode, data);
-                if (results == null && data != null && data.getData() != null) {
-                    results = new Uri[]{data.getData()};
-                }
-                filePathCallback.onReceiveValue(results);
-                filePathCallback = null;
+        @JavascriptInterface
+        public void saveBase64File(String arg1, String arg2, String mimeType) {
+            String base64Data = arg1.length() > arg2.length() ? arg1 : arg2;
+            String filename = arg1.length() > arg2.length() ? arg2 : arg1;
+            try {
+                String clean = base64Data.contains(",") ? base64Data.substring(base64Data.indexOf(",") + 1) : base64Data;
+                byte[] bytes = Base64.decode(clean, Base64.DEFAULT);
+                saveDirectBytes(bytes, filename, mimeType != null ? mimeType : "application/octet-stream");
+            } catch (Exception e) {
+                postToast("❌ 保存失败: " + e.getMessage());
             }
-        } else {
-            super.onActivityResult(requestCode, resultCode, data);
+        }
+
+        @JavascriptInterface
+        public void saveBase64File(String arg1, String arg2) {
+            saveBase64File(arg1, arg2, "application/octet-stream");
+        }
+
+        @JavascriptInterface
+        public void showToast(String msg) {
+            postToast(msg);
+        }
+
+        private void saveDirectBytes(byte[] bytes, String filename, String mimeType) throws Exception {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                ContentValues values = new ContentValues();
+                values.put(MediaStore.Downloads.DISPLAY_NAME, filename);
+                values.put(MediaStore.Downloads.MIME_TYPE, mimeType);
+                values.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
+
+                Uri uri = context.getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+                if (uri != null) {
+                    OutputStream os = context.getContentResolver().openOutputStream(uri);
+                    if (os != null) {
+                        os.write(bytes);
+                        os.flush();
+                        os.close();
+                    }
+                }
+            } else {
+                File downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+                if (!downloadsDir.exists()) downloadsDir.mkdirs();
+                File dest = new File(downloadsDir, filename);
+                FileOutputStream fos = new FileOutputStream(dest);
+                fos.write(bytes);
+                fos.flush();
+                fos.close();
+                MediaScannerConnection.scanFile(context, new String[]{dest.getAbsolutePath()}, null, null);
+            }
+            postToast("✅ 已保存至：Download/" + filename);
+        }
+
+        private void saveFileToPublicDownload(File sourceFile, String filename, String mimeType) throws Exception {
+            byte[] buffer = new byte[16384];
+            java.io.FileInputStream fis = new java.io.FileInputStream(sourceFile);
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                ContentValues values = new ContentValues();
+                values.put(MediaStore.Downloads.DISPLAY_NAME, filename);
+                values.put(MediaStore.Downloads.MIME_TYPE, mimeType);
+                values.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
+
+                Uri uri = context.getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+                if (uri != null) {
+                    OutputStream os = context.getContentResolver().openOutputStream(uri);
+                    if (os != null) {
+                        int len;
+                        while ((len = fis.read(buffer)) != -1) {
+                            os.write(buffer, 0, len);
+                        }
+                        os.flush();
+                        os.close();
+                    }
+                }
+            } else {
+                File downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+                if (!downloadsDir.exists()) downloadsDir.mkdirs();
+                File dest = new File(downloadsDir, filename);
+                FileOutputStream fos = new FileOutputStream(dest);
+                int len;
+                while ((len = fis.read(buffer)) != -1) {
+                    fos.write(buffer, 0, len);
+                }
+                fos.flush();
+                fos.close();
+                MediaScannerConnection.scanFile(context, new String[]{dest.getAbsolutePath()}, null, null);
+            }
+            fis.close();
+        }
+
+        private void postToast(final String text) {
+            new Handler(Looper.getMainLooper()).post(new Runnable() {
+                @Override
+                public void run() {
+                    Toast.makeText(context, text, Toast.LENGTH_SHORT).show();
+                }
+            });
         }
     }
 

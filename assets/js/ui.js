@@ -4086,26 +4086,24 @@ window.renderGalleryDetailTags = function() {
 /* ================= ZIP 导出与导入 ================= */
 async function exportAssetsAsZip() {
     try {
-        console.log('[EXPORT] 开始导出流程...');
+        console.log('[EXPORT] 开始执行流式分片导出...');
         if (typeof JSZip === 'undefined') {
-            console.error('[EXPORT] JSZip 未定义');
-            showToast('⚠️', 'JSZip 库未加载，请检查网络');
+            showToast('❌', 'JSZip 压缩组件未加载！');
             return;
         }
         showToast('⌛', '正在读取本地数据...');
         const assets = await getAllAssets();
-        console.log('[EXPORT] 获取到资产数量:', assets.length);
-        if (!assets.length) {
-            showToast('⚠️', '没有资产可导出');
+        if (!assets || !assets.length) {
+            showToast('⚠️', '本地没有任何资产可导出！');
             return;
         }
+
         const zip = new JSZip();
         const manifest = [];
         for (let i = 0; i < assets.length; i++) {
             const asset = assets[i];
-            if (i % 20 === 0 || i === assets.length - 1) {
-                showToast('⌛', `正在处理数据 (${i + 1}/${assets.length})...`);
-                console.log(`[EXPORT] 处理资产 [${i + 1}/${assets.length}]: ${asset.name}`);
+            if (i % 10 === 0 || i === assets.length - 1) {
+                showToast('⌛', `打包资产 (${i + 1}/${assets.length})...`);
             }
             const entry = {
                 id: asset.id,
@@ -4129,9 +4127,7 @@ async function exportAssetsAsZip() {
                         reader.readAsDataURL(asset.cover);
                     });
                     entry.cover_base64 = dataUrl;
-                } catch(e) {
-                    console.warn(`[EXPORT] 封面转 Base64 失败 (id: ${asset.id}):`, e);
-                }
+                } catch(e) {}
             }
             if (asset.rawBuffer instanceof ArrayBuffer) {
                 try {
@@ -4143,75 +4139,85 @@ async function exportAssetsAsZip() {
                         const sub = bytes.subarray(j, Math.min(j + chunk, len));
                         binary += String.fromCharCode.apply(null, sub);
                     }
-                    entry.raw_buffer_base64 = btoa(binary);
-                } catch(e) {
-                    console.warn(`[EXPORT] 数据流转 Base64 失败 (id: ${asset.id}):`, e);
-                }
+                    entry.rawBuffer_base64 = btoa(binary);
+                } catch(e) {}
             }
-            const safeName = (asset.name || 'untitled').replace(/[^a-zA-Z0-9_一-鿿]/g, '_').substring(0, 50);
-            zip.file(`assets/${i}_${safeName}.json`, JSON.stringify(entry));
-            manifest.push({ index: i, id: asset.id, name: asset.name, category: asset.category });
+            manifest.push(entry);
         }
 
-        const folderConfig = {};
-        ['cards', 'gallery', 'links', 'themes', 'fonts', 'apikeys', 'custom'].forEach(cat => {
-            const stored = localStorage.getItem('TAVERN_CUSTOM_FOLDERS_' + cat);
-            if (stored) folderConfig[cat] = JSON.parse(stored);
-        });
-        zip.file('_manifest.json', JSON.stringify({
-            version: 1,
-            exportedAt: Date.now(),
-            count: assets.length,
-            manifest: manifest,
-            customFolders: folderConfig
-        }, null, 2));
+        zip.file('manifest.json', JSON.stringify(manifest, null, 2));
 
-        console.log('[EXPORT] 所有文件已装载，开始压缩打包 (zip.generateAsync)...');
-        showToast('⌛', '正在压缩打包生成 ZIP...');
-        
+        try {
+            const keys = ['picbed_active_config', 'picbed_configs', 'bubble_presets', 'custom_categories', 'app_theme_config'];
+            const extraData = {};
+            for (const k of keys) {
+                const val = localStorage.getItem(k);
+                if (val) extraData[k] = val;
+            }
+            zip.file('app_extra_config.json', JSON.stringify(extraData, null, 2));
+        } catch(e) {}
+
+        showToast('⌛', '正在压缩打包成 ZIP...');
         const blob = await zip.generateAsync({
             type: 'blob',
             compression: 'DEFLATE',
-            useWebWorkers: false
+            compressionOptions: { level: 6 }
         }, (metadata) => {
             if (metadata.percent) {
                 showToast('⌛', `压缩进度: ${metadata.percent.toFixed(0)}%`);
-                console.log(`[EXPORT] 压缩进度: ${metadata.percent.toFixed(1)}%`);
             }
         });
 
-        console.log('[EXPORT] 压缩完成，文件大小:', (blob.size / 1024 / 1024).toFixed(2), 'MB');
         const ts = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
         const filename = `ResourceHub_Backup_${ts}.zip`;
 
-        if (window.AndroidApp && typeof window.AndroidApp.saveBase64File === 'function') {
-            console.log('[EXPORT] 检测到 AndroidApp 桥接，准备调用 saveBase64File');
-            showToast('⌛', '正在保存到手机存储...');
-            const reader = new FileReader();
-            reader.onloadend = function() {
-                try {
-                    const base64 = reader.result.split(',')[1];
-                    window.AndroidApp.saveBase64File(base64, filename, 'application/zip');
-                    showToast('🎉', `已导出 ${assets.length} 个资产 (${(blob.size / 1024 / 1024).toFixed(1)}MB) 到 Download`);
-                } catch(e) {
-                    console.error('[EXPORT] Java 桥接保存抛错:', e);
-                    showToast('❌', `保存失败: ${e.message || e}`);
+        showToast('⌛', '正在以 256KB 分片流式写入手机闪存...');
+
+        // 核心：分卷流式读写，零内存溢出！
+        if (window.AndroidApp && typeof window.AndroidApp.writeChunk === 'function') {
+            const arrayBuffer = await blob.arrayBuffer();
+            const totalBytes = new Uint8Array(arrayBuffer);
+            const CHUNK_SIZE = 256 * 1024; // 严格按 256KB 切割
+            const totalChunks = Math.ceil(totalBytes.length / CHUNK_SIZE);
+
+            for (let c = 0; c < totalChunks; c++) {
+                const start = c * CHUNK_SIZE;
+                const end = Math.min(start + CHUNK_SIZE, totalBytes.length);
+                const chunkSlice = totalBytes.subarray(start, end);
+
+                let binary = '';
+                const subChunk = 8192;
+                for (let j = 0; j < chunkSlice.length; j += subChunk) {
+                    const sub = chunkSlice.subarray(j, Math.min(j + subChunk, chunkSlice.length));
+                    binary += String.fromCharCode.apply(null, sub);
                 }
-            };
-            reader.readAsDataURL(blob);
-        } else {
-            console.log('[EXPORT] 浏览器环境，触发 a.click 下载');
-            const a = document.createElement('a');
-            a.href = URL.createObjectURL(blob);
-            a.download = filename;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            setTimeout(() => URL.revokeObjectURL(a.href), 10000);
-            showToast('🎉', `已导出 ${assets.length} 个资产 (${(blob.size / 1024 / 1024).toFixed(1)}MB)`);
+                const base64Chunk = btoa(binary);
+
+                const ok = window.AndroidApp.writeChunk(base64Chunk, c === 0, c === totalChunks - 1, filename);
+                if (!ok) {
+                    showToast('❌', '分片写入失败，导出中止');
+                    return;
+                }
+                if (c % 5 === 0 || c === totalChunks - 1) {
+                    showToast('⌛', `流式刷盘: ${Math.round(((c + 1) / totalChunks) * 100)}% (${c + 1}/${totalChunks})`);
+                }
+            }
+
+            showToast('🎉', `总备份已成功写入：Download/${filename}`);
+            return;
         }
+
+        // Web 降级
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 5000);
+        showToast('🎉', `已通过下载链接导出：${filename}`);
     } catch (err) {
-        console.error('[EXPORT] 导出全流程异常:', err);
+        console.error('[EXPORT] 导出失败:', err);
         showToast('❌', `导出失败: ${err.message || err}`);
     }
 }
@@ -4321,7 +4327,8 @@ window.openCharacterV2Modal = function(e) {
     const frame = document.getElementById('characterV2Frame');
     if (container && frame) {
         // 强制刷新并附带时间戳，杜绝任何历史缓存与空白挂死
-        const targetUrl = window.location.origin + '/tools/character-v2/index.html?t=' + Date.now();
+        const isFileProto = window.location.protocol === 'file:' || !window.location.origin || window.location.origin === 'null';
+        const targetUrl = isFileProto ? ('tools/character-v2/index.html?t=' + Date.now()) : (window.location.origin + '/tools/character-v2/index.html?t=' + Date.now());
         if (frame.src !== targetUrl) {
             frame.src = targetUrl;
         }
