@@ -4,6 +4,7 @@ import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.ContentValues;
 import android.content.Context;
+import android.content.Intent;
 import android.media.MediaScannerConnection;
 import android.net.Uri;
 import android.os.Build;
@@ -17,17 +18,21 @@ import android.view.View;
 import android.view.Window;
 import android.view.WindowManager;
 import android.webkit.JavascriptInterface;
+import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Toast;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.OutputStream;
 
 public class MainActivity extends Activity {
     private WebView webView;
+    private ValueCallback<Uri[]> uploadMessage;
+    private final static int FILE_CHOOSER_RESULT_CODE = 10000;
 
     @Override
     @SuppressLint("SetJavaScriptEnabled")
@@ -68,9 +73,57 @@ public class MainActivity extends Activity {
         webView.addJavascriptInterface(bridge, "AndroidApp");
         webView.addJavascriptInterface(bridge, "AndroidDownload");
 
-        webView.setWebChromeClient(new WebChromeClient());
+        webView.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public boolean onShowFileChooser(WebView webView, ValueCallback<Uri[]> filePathCallback, FileChooserParams fileChooserParams) {
+                if (uploadMessage != null) {
+                    uploadMessage.onReceiveValue(null);
+                    uploadMessage = null;
+                }
+                uploadMessage = filePathCallback;
+                Intent intent = fileChooserParams.createIntent();
+                try {
+                    startActivityForResult(intent, FILE_CHOOSER_RESULT_CODE);
+                } catch (Exception e) {
+                    uploadMessage = null;
+                    Toast.makeText(MainActivity.appContext != null ? MainActivity.appContext : MainActivity.this, "无法打开文件选择器: " + e.getMessage(), Toast.LENGTH_SHORT).show();
+                    return false;
+                }
+                return true;
+            }
+        });
+
         webView.setWebViewClient(new WebViewClient());
         webView.loadUrl("file:///android_asset/index.html");
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent intent) {
+        super.onActivityResult(requestCode, resultCode, intent);
+        if (requestCode == FILE_CHOOSER_RESULT_CODE) {
+            if (uploadMessage == null) return;
+            Uri[] results = null;
+            if (resultCode == RESULT_OK && intent != null) {
+                String dataString = intent.getDataString();
+                if (dataString != null) {
+                    results = new Uri[]{Uri.parse(dataString)};
+                } else if (intent.getClipData() != null) {
+                    int count = intent.getClipData().getItemCount();
+                    results = new Uri[count];
+                    for (int i = 0; i < count; i++) {
+                        results[i] = intent.getClipData().getItemAt(i).getUri();
+                    }
+                }
+            }
+            uploadMessage.onReceiveValue(results);
+            uploadMessage = null;
+        }
+    }
+
+    public static Context appContext;
+
+    {
+        appContext = this;
     }
 
     public static class WebAppInterface {
@@ -82,7 +135,6 @@ public class MainActivity extends Activity {
             this.context = context;
         }
 
-        // ==================== 256KB 分片流式写入核心接口 ====================
         @JavascriptInterface
         public synchronized boolean writeChunk(String chunkBase64, boolean isFirstChunk, boolean isLastChunk, String filename) {
             try {
@@ -111,11 +163,24 @@ public class MainActivity extends Activity {
                         currentFos = null;
                     }
                     if (currentTempFile != null && currentTempFile.exists()) {
-                        String outName = (filename != null && !filename.isEmpty()) ? filename : ("ResourceHub_Backup_" + System.currentTimeMillis() + ".zip");
-                        saveFileToPublicDownload(currentTempFile, outName, "application/zip");
-                        currentTempFile.delete();
+                        final File tempToSave = currentTempFile;
+                        final String outName = (filename != null && !filename.isEmpty()) ? filename : ("ResourceHub_Backup_" + System.currentTimeMillis() + ".zip");
+                        
+                        // 异步线程落盘，绝不卡死主线程
+                        new Thread(new Runnable() {
+                            @Override
+                            public void run() {
+                                try {
+                                    saveFileToPublicDownload(tempToSave, outName, "application/zip");
+                                    tempToSave.delete();
+                                    postToast("🎉 备份已成功写入：Download/" + outName);
+                                } catch (Exception e) {
+                                    postToast("❌ 落盘失败: " + e.getMessage());
+                                }
+                            }
+                        }).start();
+
                         currentTempFile = null;
-                        postToast("🎉 备份已成功写入：Download/" + outName);
                     }
                 }
                 return true;
@@ -131,15 +196,22 @@ public class MainActivity extends Activity {
 
         @JavascriptInterface
         public void saveBase64File(String arg1, String arg2, String mimeType) {
-            String base64Data = arg1.length() > arg2.length() ? arg1 : arg2;
-            String filename = arg1.length() > arg2.length() ? arg2 : arg1;
-            try {
-                String clean = base64Data.contains(",") ? base64Data.substring(base64Data.indexOf(",") + 1) : base64Data;
-                byte[] bytes = Base64.decode(clean, Base64.DEFAULT);
-                saveDirectBytes(bytes, filename, mimeType != null ? mimeType : "application/octet-stream");
-            } catch (Exception e) {
-                postToast("❌ 保存失败: " + e.getMessage());
-            }
+            final String base64Data = arg1.length() > arg2.length() ? arg1 : arg2;
+            final String filename = arg1.length() > arg2.length() ? arg2 : arg1;
+            final String mType = mimeType != null ? mimeType : "application/octet-stream";
+
+            new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        String clean = base64Data.contains(",") ? base64Data.substring(base64Data.indexOf(",") + 1) : base64Data;
+                        byte[] bytes = Base64.decode(clean, Base64.DEFAULT);
+                        saveDirectBytes(bytes, filename, mType);
+                    } catch (Exception e) {
+                        postToast("❌ 保存失败: " + e.getMessage());
+                    }
+                }
+            }).start();
         }
 
         @JavascriptInterface
@@ -183,7 +255,7 @@ public class MainActivity extends Activity {
 
         private void saveFileToPublicDownload(File sourceFile, String filename, String mimeType) throws Exception {
             byte[] buffer = new byte[16384];
-            java.io.FileInputStream fis = new java.io.FileInputStream(sourceFile);
+            FileInputStream fis = new FileInputStream(sourceFile);
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 ContentValues values = new ContentValues();
