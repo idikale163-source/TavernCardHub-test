@@ -4118,44 +4118,83 @@ async function exportAssetsAsZip() {
                 cardData: asset.cardData || null,
                 createdAt: asset.createdAt
             };
-            if (asset.cover instanceof Blob) {
-                try {
-                    const dataUrl = await new Promise((resolve, reject) => {
-                        const reader = new FileReader();
-                        reader.onload = () => resolve(reader.result);
-                        reader.onerror = reject;
-                        reader.readAsDataURL(asset.cover);
-                    });
-                    entry.cover_base64 = dataUrl;
-                } catch(e) {}
-            }
-            if (asset.rawBuffer instanceof ArrayBuffer) {
-                try {
-                    const bytes = new Uint8Array(asset.rawBuffer);
-                    let binary = '';
-                    const len = bytes.byteLength;
-                    const chunk = 8192;
-                    for (let j = 0; j < len; j += chunk) {
-                        const sub = bytes.subarray(j, Math.min(j + chunk, len));
-                        binary += String.fromCharCode.apply(null, sub);
+            // === 修复：IndexedDB 取出的 cover/rawBuffer 可能是 Blob/ArrayBuffer/TypeArray/base64字符串 等多种形态 ===
+            try {
+                const cov = asset.cover;
+                if (cov) {
+                    if (typeof cov === 'string' && cov.indexOf('data:') === 0) {
+                        entry.cover_base64 = cov;
+                    } else if (cov instanceof Blob) {
+                        const dataUrl = await new Promise((resolve, reject) => {
+                            const reader = new FileReader();
+                            reader.onload = () => resolve(reader.result);
+                            reader.onerror = reject;
+                            reader.readAsDataURL(cov);
+                        });
+                        entry.cover_base64 = dataUrl;
+                    } else if (cov instanceof ArrayBuffer || ArrayBuffer.isView(cov) || (cov && cov.buffer instanceof ArrayBuffer)) {
+                        const u8 = cov instanceof ArrayBuffer ? new Uint8Array(cov)
+                                 : (ArrayBuffer.isView(cov) ? new Uint8Array(cov.buffer, cov.byteOffset, cov.byteLength)
+                                                            : new Uint8Array(cov.buffer));
+                        entry.cover_base64 = getAssetImageUrl(cov) || '';
                     }
-                    entry.rawBuffer_base64 = btoa(binary);
-                } catch(e) {}
-            }
+                }
+            } catch(e) { console.warn('[EXPORT] cover 序列化跳过:', e); }
+            // === 修复：rawBuffer 兼容 ArrayBuffer / TypedArray / base64 字符串 ===
+            try {
+                const rb = asset.rawBuffer;
+                if (rb) {
+                    if (typeof rb === 'string') {
+                        entry.rawBuffer_base64 = rb;
+                    } else {
+                        let u8 = null;
+                        if (rb instanceof ArrayBuffer) u8 = new Uint8Array(rb);
+                        else if (ArrayBuffer.isView(rb)) u8 = new Uint8Array(rb.buffer, rb.byteOffset, rb.byteLength);
+                        else if (rb.buffer instanceof ArrayBuffer) u8 = new Uint8Array(rb.buffer);
+                        if (u8 && u8.byteLength) {
+                            let binary = '';
+                            const chunk = 8192;
+                            for (let j = 0; j < u8.length; j += chunk) {
+                                const sub = u8.subarray(j, Math.min(j + chunk, u8.length));
+                                binary += String.fromCharCode.apply(null, sub);
+                            }
+                            entry.rawBuffer_base64 = btoa(binary);
+                        }
+                    }
+                }
+            } catch(e) { console.warn('[EXPORT] rawBuffer 序列化跳过:', e); }
             manifest.push(entry);
         }
 
-        zip.file('manifest.json', JSON.stringify(manifest, null, 2));
-
+        // 兼容两种命名，避免导出/导入对不上
+        const manifestStr = JSON.stringify(manifest, null, 2);
+        zip.file('manifest.json', manifestStr);
+        zip.file('_manifest.json', manifestStr);
+        // 兼容旧导入：附加 assets/<id>.json 分片
+        for (let i = 0; i < manifest.length; i++) {
+            const e = manifest[i];
+            const safeId = String(e.id || ('asset_' + i)).replace(/[^A-Za-z0-9_-]/g, '_');
+            zip.file('assets/' + safeId + '.json', JSON.stringify(e));
+        }
         try {
-            const keys = ['picbed_active_config', 'picbed_configs', 'bubble_presets', 'custom_categories', 'app_theme_config'];
             const extraData = {};
-            for (const k of keys) {
+            const SKIP = /^(TAVERN_TMP_|debug_|__)/;
+            for (let i = 0; i < localStorage.length; i++) {
+                const k = localStorage.key(i);
+                if (!k || SKIP.test(k)) continue;
                 const val = localStorage.getItem(k);
-                if (val) extraData[k] = val;
+                if (val !== null && val.length < 5 * 1024 * 1024) extraData[k] = val;
             }
             zip.file('app_extra_config.json', JSON.stringify(extraData, null, 2));
-        } catch(e) {}
+            const customFolders = {};
+            for (let i = 0; i < localStorage.length; i++) {
+                const k = localStorage.key(i);
+                if (k && k.indexOf('TAVERN_CUSTOM_FOLDERS_') === 0) {
+                    try { customFolders[k.replace('TAVERN_CUSTOM_FOLDERS_', '')] = JSON.parse(localStorage.getItem(k)); } catch(e) {}
+                }
+            }
+            zip.file('_meta.json', JSON.stringify({ customFolders: customFolders, exportedAt: Date.now(), version: 2 }, null, 2));
+        } catch(e) { console.warn('[EXPORT] 配置导出异常:', e); }
 
         showToast('⌛', '正在压缩打包成 ZIP...');
         const blob = await zip.generateAsync({
@@ -4239,22 +4278,55 @@ async function importAssetsFromZip() {
             }
             showToast('⌛', '正在解压导入...');
             const zip = await JSZip.loadAsync(file);
-            const manifestFile = zip.file('_manifest.json');
-            if (!manifestFile) {
+            // === 兼容读取：_manifest.json（旧）/ manifest.json（新）===
+            let entries = null;
+            const mf = zip.file('_manifest.json') || zip.file('manifest.json');
+            if (mf) {
+                const parsed = JSON.parse(await mf.async('string'));
+                if (Array.isArray(parsed)) entries = parsed;
+                else if (parsed && Array.isArray(parsed.assets)) entries = parsed.assets;
+                else entries = [];
+            }
+            // 回退：assets/*.json 分片
+            if (!entries || !entries.length) {
+                const assetFiles = Object.keys(zip.files).filter(f => f.startsWith('assets/') && f.endsWith('.json'));
+                if (assetFiles.length) {
+                    entries = [];
+                    for (let i = 0; i < assetFiles.length; i++) {
+                        try { entries.push(JSON.parse(await zip.files[assetFiles[i]].async('string'))); } catch(e) {}
+                    }
+                }
+            }
+            if (!entries || !entries.length) {
                 showToast('❌', '不是有效的 ResourceHub 备份文件');
                 return;
             }
-            const manifestData = JSON.parse(await manifestFile.async('string'));
-            // 恢复自定义文件夹
-            if (manifestData.customFolders) {
-                for (let cat in manifestData.customFolders) {
-                    localStorage.setItem('TAVERN_CUSTOM_FOLDERS_' + cat, JSON.stringify(manifestData.customFolders[cat]));
+            // 恢复自定义文件夹（新格式在 _meta.json，旧格式在清单里）
+            let metaObj = null;
+            const metaFile = zip.file('_meta.json');
+            if (metaFile) { try { metaObj = JSON.parse(await metaFile.async('string')); } catch(e) {} }
+            const cfSource = (metaObj && metaObj.customFolders) || (entries.customFolders) || null;
+            if (cfSource) {
+                for (let cat in cfSource) {
+                    localStorage.setItem('TAVERN_CUSTOM_FOLDERS_' + cat, JSON.stringify(cfSource[cat]));
                 }
+                if (typeof renderCustomFolders === 'function') { try { renderCustomFolders(); } catch(e) {} }
             }
-            let imported = 0;
-            const assetFiles = Object.keys(zip.files).filter(f => f.startsWith('assets/') && f.endsWith('.json'));
-            for (let i = 0; i < assetFiles.length; i++) {
-                const entry = JSON.parse(await zip.files[assetFiles[i]].async('string'));
+            // 恢复 localStorage 配置（图床/主题/预设等）
+            const cfgFile = zip.file('app_extra_config.json');
+            if (cfgFile) {
+                try {
+                    const cfg = JSON.parse(await cfgFile.async('string'));
+                    let restored = 0;
+                    for (const k in cfg) {
+                        if (typeof cfg[k] === 'string') { localStorage.setItem(k, cfg[k]); restored++; }
+                    }
+                    if (restored) showToast('ℹ️', `已恢复 ${restored} 项配置`);
+                } catch(e) { console.warn('[IMPORT] 配置恢复跳过:', e); }
+            }
+            const total = entries.length;
+            for (let i = 0; i < total; i++) {
+                const entry = entries[i];
                 const asset = {
                     id: entry.id,
                     category: entry.category,
@@ -4279,10 +4351,11 @@ async function importAssetsFromZip() {
                         asset.cover = new Blob([nbytes], { type: mime });
                     } catch(e) { console.warn('cover restore failed', e); }
                 }
-                // 从 base64 还原 rawBuffer
-                if (entry.raw_buffer_base64) {
+                // 从 base64 还原 rawBuffer（兼容两种字段命名）
+                const rb64 = entry.rawBuffer_base64 || entry.raw_buffer_base64;
+                if (rb64) {
                     try {
-                        const bstr = atob(entry.raw_buffer_base64);
+                        const bstr = atob(String(rb64).replace(/^data:[^;]+;base64,/, ''));
                         let nbytes = new Uint8Array(bstr.length);
                         for (let j = 0; j < bstr.length; j++) nbytes[j] = bstr.charCodeAt(j);
                         asset.rawBuffer = nbytes.buffer;
@@ -4291,7 +4364,7 @@ async function importAssetsFromZip() {
                 await saveAsset(asset);
                 imported++;
                 if (imported % 20 === 0) {
-                    showToast('⌛', `已导入 ${imported}/${assetFiles.length}...`);
+                    showToast('⌛', `已导入 ${imported}/${total}...`);
                 }
             }
             allAssetsCache = null;
