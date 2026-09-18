@@ -4408,6 +4408,7 @@ async function importAssetsFromZip() {
                 } catch(e) { console.warn('[IMPORT] 配置恢复跳过:', e); }
             }
             const total = entries.length;
+            let imported = 0;
             for (let i = 0; i < total; i++) {
                 const entry = entries[i];
                 const asset = {
