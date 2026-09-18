@@ -5,6 +5,8 @@ import android.app.Activity;
 import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.media.MediaScannerConnection;
 import android.net.Uri;
 import android.os.Build;
@@ -81,7 +83,13 @@ public class MainActivity extends Activity {
                     uploadMessage = null;
                 }
                 uploadMessage = filePathCallback;
-                Intent intent = fileChooserParams.createIntent();
+                // WebView's createIntent() is not reliable for multiple files on
+                // some Android picker implementations. Build an explicit
+                // ACTION_OPEN_DOCUMENT intent and force multi-select.
+                Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                intent.addCategory(Intent.CATEGORY_OPENABLE);
+                intent.setType("*/*");
+                intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
                 try {
                     startActivityForResult(intent, FILE_CHOOSER_RESULT_CODE);
                 } catch (Exception e) {
@@ -222,6 +230,23 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void showToast(String msg) {
             postToast(msg);
+        }
+
+        @JavascriptInterface
+        public void copyText(final String text) {
+            new Handler(Looper.getMainLooper()).post(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        ClipboardManager clipboard = (ClipboardManager) context.getSystemService(Context.CLIPBOARD_SERVICE);
+                        if (clipboard == null) throw new IllegalStateException("剪贴板不可用");
+                        clipboard.setPrimaryClip(ClipData.newPlainText("ResourceHub", text != null ? text : ""));
+                        postToast("✅ 已复制到剪贴板");
+                    } catch (Exception e) {
+                        postToast("❌ 复制失败: " + e.getMessage());
+                    }
+                }
+            });
         }
 
         private void saveDirectBytes(byte[] bytes, String filename, String mimeType) throws Exception {

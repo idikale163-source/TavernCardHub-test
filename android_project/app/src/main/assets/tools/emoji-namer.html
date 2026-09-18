@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>表情包批量命名</title>
+  <style>
+    :root {
+      --bg: #F4F1EA;
+      --card-bg: #FFFFFF;
+      --card-sub: #FAF9F6;
+      --text-main: #33383B;
+      --text-muted: #828A8F;
+      --accent: #5B7A68;
+      --accent-light: #EBF1ED;
+      --accent-active: #476253;
+      --border: #E5E1D8;
+      --radius-lg: 20px;
+      --radius-md: 14px;
+      --radius-sm: 10px;
+      --shadow: 0 4px 20px rgba(50, 50, 50, 0.04);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", Roboto, sans-serif;
+      background-color: var(--bg);
+      color: var(--text-main);
+      padding: 20px 16px 130px 16px;
+      line-height: 1.5;
+    }
+    .container { max-width: 680px; margin: 0 auto; }
+    .top-header { margin-bottom: 20px; }
+    .header-row { display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 8px; }
+    .app-title { font-size: 1.25rem; font-weight: 700; color: var(--text-main); letter-spacing: -0.3px; }
+    .progress-tag { font-size: 0.82rem; font-weight: 600; color: var(--accent); background: var(--accent-light); padding: 3px 10px; border-radius: 20px; }
+    .progress-track { width: 100%; height: 6px; background: #E4DFD5; border-radius: 10px; overflow: hidden; }
+    .progress-bar { width: 0%; height: 100%; background: var(--accent); border-radius: 10px; transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
+    .card { background: var(--card-bg); border-radius: var(--radius-lg); padding: 16px 18px; border: 1px solid var(--border); box-shadow: var(--shadow); margin-bottom: 20px; }
+    .card-title { font-size: 0.9rem; font-weight: 700; color: var(--text-main); margin-bottom: 10px; }
+    textarea { width: 100%; height: 100px; border: 1px solid var(--border); border-radius: var(--radius-md); padding: 12px; font-size: 0.88rem; background: var(--card-sub); color: var(--text-main); outline: none; resize: vertical; line-height: 1.5; transition: border-color 0.2s; }
+    textarea:focus { border-color: var(--accent); background: #fff; }
+    textarea::placeholder { color: #A6AEA8; }
+    .hint { font-size: 0.76rem; color: var(--text-muted); margin: 8px 2px 14px 2px; }
+    .btn-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+    .btn { padding: 10px 0; border-radius: var(--radius-sm); font-size: 0.88rem; font-weight: 600; cursor: pointer; border: 1px solid transparent; display: inline-flex; align-items: center; justify-content: center; gap: 4px; transition: all 0.15s ease; }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-primary:active { background: var(--accent-active); }
+    .btn-sub { background: var(--card-sub); color: var(--text-main); border-color: var(--border); }
+    .btn-sub:active { background: #ECE8DE; }
+    .list-header { display: flex; justify-content: space-between; align-items: center; margin: 0 4px 12px 4px; }
+    .list-title { font-size: 1.05rem; font-weight: 700; color: var(--text-main); }
+    .btn-text { background: none; border: none; font-size: 0.82rem; color: var(--text-muted); cursor: pointer; padding: 4px 6px; }
+    .items-container { display: flex; flex-direction: column; gap: 12px; }
+    .item-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.02); display: flex; flex-direction: column; gap: 8px; }
+    .item-main { display: flex; align-items: center; gap: 12px; }
+    .item-checkbox { width: 19px; height: 19px; accent-color: var(--accent); cursor: pointer; flex-shrink: 0; border-radius: 4px; }
+    .item-thumb-box { width: 54px; height: 54px; border-radius: var(--radius-sm); overflow: hidden; background: var(--card-sub); flex-shrink: 0; display: flex; align-items: center; justify-content: center; border: 1px solid var(--border); }
+    .item-thumb-box img { width: 100%; height: 100%; object-fit: cover; cursor: zoom-in; }
+    .item-thumb-box .error-box { font-size: 0.65rem; color: #999; text-align: center; line-height: 1.1; }
+    .item-input-wrap { flex: 1; }
+    .item-name-input { width: 100%; padding: 9px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: 0.9rem; outline: none; background: var(--card-sub); transition: all 0.2s; }
+    .item-name-input:focus { border-color: var(--accent); background: #FFFFFF; }
+    .item-generated-url { display: none; font-size: 0.78rem; color: #555E58; background: #EDEAE1; padding: 7px 10px; border-radius: 6px; word-break: break-all; line-height: 1.4; font-family: monospace; margin-top: 2px; }
+    .show-urls .item-generated-url { display: block; }
+    .bottom-bar { position: fixed; bottom: 0; left: 0; right: 0; background: rgba(244, 241, 234, 0.92); backdrop-filter: blur(16px); border-top: 1px solid rgba(229, 225, 216, 0.8); padding: 10px 16px calc(10px + env(safe-area-inset-bottom)) 16px; box-shadow: 0 -4px 20px rgba(0,0,0,0.05); z-index: 100; }
+    .bottom-inner { max-width: 680px; margin: 0 auto; display: flex; flex-direction: column; gap: 8px; }
+    .symbol-row { display: flex; align-items: center; justify-content: space-between; font-size: 0.82rem; font-weight: 600; color: var(--text-muted); }
+    .symbol-input { width: 90px; padding: 4px 8px; border: 1px solid var(--border); border-radius: 6px; text-align: center; font-size: 0.85rem; outline: none; background: #fff; }
+    .symbol-input:focus { border-color: var(--accent); }
+    .bottom-btn-group { display: grid; grid-template-columns: 0.9fr 1.1fr 1.2fr 1.2fr; gap: 6px; }
+    .bottom-btn-group button { padding: 9px 0; font-size: 0.84rem; }
+    .empty-tip { text-align: center; padding: 40px 0; color: var(--text-muted); font-size: 0.85rem; }
+    .toast { position: fixed; top: 24px; left: 50%; transform: translateX(-50%) translateY(-100px); background: rgba(47, 54, 64, 0.92); color: #fff; padding: 9px 18px; border-radius: 30px; font-size: 0.84rem; font-weight: 500; box-shadow: 0 4px 16px rgba(0,0,0,0.15); backdrop-filter: blur(8px); transition: transform 0.3s cubic-bezier(0.18, 0.89, 0.32, 1.28); z-index: 1000; pointer-events: none; }
+    .toast.show { transform: translateX(-50%) translateY(0); }
+    .lightbox { position: fixed; inset: 0; background: rgba(0,0,0,0.85); display: none; align-items: center; justify-content: center; z-index: 999; padding: 16px; }
+    .lightbox.active { display: flex; }
+    .lightbox img { max-width: 95%; max-height: 90%; border-radius: 8px; object-fit: contain; }
+  </style>
+</head>
+<body>
+<div class="container">
+  <div class="top-header">
+    <div class="header-row">
+      <div class="app-title">表情包批量命名</div>
+      <div class="progress-tag" id="progressTag">0 / 0 已命名</div>
+    </div>
+    <div class="progress-track">
+      <div class="progress-bar" id="progressBar"></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title">批量表情包链接导入</div>
+    <textarea id="rawInput" placeholder="在此粘贴表情包直链或包含链接的整段文本..."></textarea>
+    <div class="hint">自动提取 http(s) 链接并过滤重复项，支持导入 TXT。</div>
+    <div class="btn-row">
+      <button class="btn btn-primary" onclick="processInput(false)">追加表情</button>
+      <button class="btn btn-sub" onclick="processInput(true)">替换列表</button>
+      <button class="btn btn-sub" onclick="document.getElementById('fileInput').click()">导入 TXT</button>
+      <input type="file" id="fileInput" accept=".txt" style="display:none" onchange="handleFileImport(event)">
+    </div>
+  </div>
+  <div class="list-header">
+    <div class="list-title">表情清单 · <span id="countSpan" style="color:var(--text-muted); font-size: 0.95rem;">0</span></div>
+    <button class="btn-text" onclick="clearAllList()">清空列表</button>
+  </div>
+  <div class="items-container" id="itemsList">
+    <div class="empty-tip">暂无表情包，请在上方粘贴链接后追加</div>
+  </div>
+</div>
+<div class="bottom-bar">
+  <div class="bottom-inner">
+    <div class="symbol-row">
+      <span>自定义连接符号：</span>
+      <input type="text" class="symbol-input" id="separator" value=" - " placeholder="如 - 或 |" oninput="updateVisibleUrls()">
+    </div>
+    <div class="bottom-btn-group">
+      <button class="btn btn-sub" onclick="toggleSelectAll()">全选</button>
+      <button class="btn btn-sub" id="revealBtn" onclick="toggleRevealUrls()">显示链接</button>
+      <button class="btn btn-sub" style="background:#EBF1ED; color:var(--accent); border-color:var(--accent);" onclick="copyExportText()">复制导出</button>
+      <button class="btn btn-primary" onclick="exportTxtFile()">下载 TXT</button>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+<div class="lightbox" id="lightbox" onclick="this.classList.remove('active')">
+  <img id="lightboxImg" referrerpolicy="no-referrer" src="" alt="表情大图预览">
+</div>
+<script>
+  let list = [];
+  let isRevealed = false;
+  function showToast(msg) {
+    const t = document.getElementById('toast');
+    t.innerText = msg;
+    t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), 2200);
+  }
+  function extractUrls(text) {
+    const urlRegex = /(https?:\/\/[^\s\r\n\t]+)/gi;
+    const matches = text.match(urlRegex) || [];
+    const set = new Set();
+    const res = [];
+    for (let u of matches) {
+      u = u.replace(/[),;。，]$/, '');
+      if (!set.has(u)) { set.add(u); res.push(u); }
+    }
+    return res;
+  }
+  function processInput(isReplace) {
+    const text = document.getElementById('rawInput').value;
+    const urls = extractUrls(text);
+    if (urls.length === 0) { showToast('⚠️ 未找到有效的表情包链接！'); return; }
+    const newItems = urls.map(url => ({
+      id: Date.now() + Math.random().toString(36).substr(2, 6),
+      url: url,
+      name: '',
+      checked: true
+    }));
+    if (isReplace) { list = newItems; } else {
+      const existUrls = new Set(list.map(i => i.url));
+      const filtered = newItems.filter(i => !existUrls.has(i.url));
+      list = [...list, ...filtered];
+    }
+    document.getElementById('rawInput').value = '';
+    isRevealed = false;
+    updateRevealBtn();
+    renderList();
+    showToast(`✨ 成功导入 ${urls.length} 个表情`);
+  }
+  function renderList() {
+    const container = document.getElementById('itemsList');
+    document.getElementById('countSpan').innerText = list.length;
+    updateProgress();
+    if (list.length === 0) {
+      container.innerHTML = '<div class="empty-tip">暂无表情包，请在上方粘贴链接后追加</div>';
+      return;
+    }
+    const sep = document.getElementById('separator').value;
+    container.className = 'items-container' + (isRevealed ? ' show-urls' : '');
+    container.innerHTML = list.map((item, index) => {
+      const displayName = item.name.trim() || `表情${index + 1}`;
+      const combined = `${displayName}${sep}${item.url}`;
+      return `
+        <div class="item-card" id="card-${item.id}">
+          <div class="item-main">
+            <input type="checkbox" class="item-checkbox" ${item.checked ? 'checked' : ''} onchange="toggleItem('${item.id}', this.checked)">
+            <div class="item-thumb-box" onclick="openLightbox('${item.url}')">
+              <img src="${item.url}" referrerpolicy="no-referrer" loading="lazy" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
+              <div class="error-box" style="display:none;">加载失败</div>
+            </div>
+            <div class="item-input-wrap">
+              <input type="text" class="item-name-input" value="${item.name}" placeholder="给表情取名..." oninput="handleNameChange('${item.id}', this.value)">
+            </div>
+          </div>
+          <div class="item-generated-url" id="url-text-${item.id}">${combined}</div>
+        </div>
+      `;
+    }).join('');
+  }
+  function handleNameChange(id, val) {
+    const target = list.find(i => i.id === id);
+    if (target) {
+      target.name = val;
+      updateProgress();
+      if (isRevealed) {
+        const sep = document.getElementById('separator').value;
+        const el = document.getElementById(`url-text-${id}`);
+        if (el) el.innerText = `${val.trim() || '未命名'}${sep}${target.url}`;
+      }
+    }
+  }
+  function toggleItem(id, checked) {
+    const target = list.find(i => i.id === id);
+    if (target) target.checked = checked;
+  }
+  function toggleSelectAll() {
+    if (list.length === 0) return;
+    const allChecked = list.every(i => i.checked);
+    list.forEach(i => i.checked = !allChecked);
+    renderList();
+    showToast(!allChecked ? '已全选' : '已取消全选');
+  }
+  function toggleRevealUrls() {
+    if (list.length === 0) return showToast('⚠️ 列表为空');
+    isRevealed = !isRevealed;
+    updateRevealBtn();
+    renderList();
+  }
+  function updateRevealBtn() {
+    const btn = document.getElementById('revealBtn');
+    if (isRevealed) {
+      btn.innerText = '隐藏链接';
+      btn.style.background = '#E5E1D8';
+    } else {
+      btn.innerText = '显示链接';
+      btn.style.background = 'var(--card-sub)';
+    }
+  }
+  function updateVisibleUrls() {
+    if (isRevealed) renderList();
+  }
+  function updateProgress() {
+    const total = list.length;
+    const namedCount = list.filter(i => i.name && i.name.trim().length > 0).length;
+    document.getElementById('progressTag').innerText = `${namedCount} / ${total} 已命名`;
+    const pct = total === 0 ? 0 : Math.round((namedCount / total) * 100);
+    document.getElementById('progressBar').style.width = `${pct}%`;
+  }
+  function clearAllList() {
+    if (list.length === 0) return;
+    if (confirm('确认清空所有表情吗？')) {
+      list = [];
+      isRevealed = false;
+      updateRevealBtn();
+      renderList();
+      showToast('列表已清空');
+    }
+  }
+  function handleFileImport(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      document.getElementById('rawInput').value = event.target.result;
+      processInput(false);
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  }
+  function generateExportData() {
+    const sep = document.getElementById('separator').value;
+    const selected = list.filter(i => i.checked);
+    if (selected.length === 0) return null;
+    return selected.map((i, idx) => {
+      const n = i.name.trim() || `表情${idx + 1}`;
+      return `${n}${sep}${i.url}`;
+    }).join('\n');
+  }
+  function copyTextCompat(text) {
+    // Android WebView/iframe often rejects navigator.clipboard. Prefer the
+    // native bridge, then fall back to the browser clipboard and textarea API.
+    try {
+      if (window.AndroidApp && typeof window.AndroidApp.copyText === 'function') {
+        window.AndroidApp.copyText(text);
+        return Promise.resolve();
+      }
+    } catch (_) {}
+    if (navigator.clipboard && window.isSecureContext) {
+      return navigator.clipboard.writeText(text);
+    }
+    return new Promise((resolve, reject) => {
+      const area = document.createElement('textarea');
+      area.value = text;
+      area.style.position = 'fixed';
+      area.style.opacity = '0';
+      document.body.appendChild(area);
+      area.focus();
+      area.select();
+      try {
+        if (document.execCommand('copy')) resolve();
+        else reject(new Error('copy failed'));
+      } catch (e) { reject(e); }
+      area.remove();
+    });
+  }
+  function utf8ToBase64(text) {
+    const bytes = new TextEncoder().encode(text);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    }
+    return btoa(binary);
+  }
+  function copyExportText() {
+    const text = generateExportData();
+    if (!text) return showToast('⚠️ 请先勾选要导出的表情');
+    copyTextCompat(text).then(() => {
+      showToast('📋 已复制全部表情包命名与链接！');
+    }).catch(() => {
+      showToast('复制失败，请长按文本手动复制');
+    });
+  }
+  function exportTxtFile() {
+    const text = generateExportData();
+    if (!text) return showToast('⚠️ 请先勾选要导出的表情');
+    const dateStr = new Date().toISOString().slice(0, 10);
+    const filename = `表情包命名导出_${dateStr}.txt`;
+    try {
+      if (window.AndroidApp && typeof window.AndroidApp.saveBase64File === 'function') {
+        window.AndroidApp.saveBase64File(utf8ToBase64(text), filename, 'text/plain');
+        showToast('💾 TXT 正在保存到 Download');
+        return;
+      }
+    } catch (_) {}
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    showToast('💾 TXT 文件已开始下载');
+  }
+  function openLightbox(url) {
+    document.getElementById('lightboxImg').src = url;
+    document.getElementById('lightbox').classList.add('active');
+  }
+</script>
+</body>
+</html>

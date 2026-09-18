@@ -3854,7 +3854,7 @@ window.openEmojiNamerModal = function(e) {
     const frame = document.getElementById('emojiNamerFrame');
     if (container && frame) {
         if (frame.src === 'about:blank' || !frame.src) {
-            frame.src = 'https://idikale163-source.github.io/emoji-namer/';
+            frame.src = 'tools/emoji-namer.html';
         }
         container.style.display = 'flex';
         initNamerFloatingBtnDrag();
@@ -4327,8 +4327,12 @@ window.openCharacterV2Modal = function(e) {
     const frame = document.getElementById('characterV2Frame');
     if (container && frame) {
         // 强制刷新并附带时间戳，杜绝任何历史缓存与空白挂死
+        // 注意：网页端 Vercel 开启了 cleanUrls，请求显式 index.html 会被 308 重定向，导致 iframe 白屏。
+        // 因此网页端统一使用目录形式（/tools/character-v2/?t=...），file:// 环境仍用 index.html。
         const isFileProto = window.location.protocol === 'file:' || !window.location.origin || window.location.origin === 'null';
-        const targetUrl = isFileProto ? ('tools/character-v2/index.html?t=' + Date.now()) : (window.location.origin + '/tools/character-v2/index.html?t=' + Date.now());
+        const targetUrl = isFileProto
+            ? ('tools/character-v2/index.html?t=' + Date.now())
+            : (window.location.origin + '/tools/character-v2/?t=' + Date.now());
         if (frame.src !== targetUrl) {
             frame.src = targetUrl;
         }
