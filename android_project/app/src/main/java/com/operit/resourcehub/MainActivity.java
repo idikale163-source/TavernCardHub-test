@@ -30,6 +30,8 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.OutputStream;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 public class MainActivity extends Activity {
     private WebView webView;
@@ -141,6 +143,105 @@ public class MainActivity extends Activity {
 
         public WebAppInterface(Context context) {
             this.context = context;
+        }
+
+        // ================= 原生 ZIP 流式导出（大文件专用） =================
+        // JSZip 必须把整个压缩包堆在内存，数百 MB 时必然 OOM。
+        // 改为 JS 逐条调用 zipStart / zipAddFile / zipFinish，Java 边收边写盘，
+        // 内存占用恒定（仅当前条目），可支持数百 MB 乃至 GB 级备份。
+        private ZipOutputStream zipOutStream = null;
+        private File zipTempFile = null;
+        private String zipOutName = null;
+        private int zipEntryCount = 0;
+
+        @JavascriptInterface
+        public synchronized boolean zipStart(String filename) {
+            try {
+                zipClose();
+                File cacheDir = context.getCacheDir();
+                zipTempFile = new File(cacheDir, "export_zip_" + System.currentTimeMillis() + ".tmp");
+                if (zipTempFile.exists()) zipTempFile.delete();
+                zipOutStream = new ZipOutputStream(new java.io.BufferedOutputStream(new FileOutputStream(zipTempFile), 65536));
+                zipOutName = (filename != null && !filename.isEmpty()) ? filename : ("ResourceHub_Backup_" + System.currentTimeMillis() + ".zip");
+                zipEntryCount = 0;
+                return true;
+            } catch (Exception e) {
+                postToast("zipStart failed: " + e.getMessage());
+                zipClose();
+                return false;
+            }
+        }
+
+        // 以 Base64 传入一条文件的完整内容，写入当前 ZIP（STORED 模式，需自算 CRC32）
+        @JavascriptInterface
+        public synchronized boolean zipAddFile(String entryName, String contentBase64) {
+            if (zipOutStream == null) return false;
+            try {
+                if (entryName == null || entryName.isEmpty()) return false;
+                String clean = (contentBase64 != null && contentBase64.contains(","))
+                        ? contentBase64.substring(contentBase64.indexOf(",") + 1) : contentBase64;
+                byte[] data = (clean == null || clean.isEmpty()) ? new byte[0] : Base64.decode(clean, Base64.DEFAULT);
+                ZipEntry entry = new ZipEntry(entryName);
+                entry.setMethod(ZipEntry.STORED);
+                entry.setSize(data.length);
+                entry.setCompressedSize(data.length);
+                java.util.zip.CRC32 crc = new java.util.zip.CRC32();
+                crc.update(data, 0, data.length);
+                entry.setCrc(crc.getValue());
+                zipOutStream.putNextEntry(entry);
+                zipOutStream.write(data);
+                zipOutStream.closeEntry();
+                zipEntryCount++;
+                return true;
+            } catch (Exception e) {
+                postToast("zipAddFile failed[" + entryName + "]: " + e.getMessage());
+                return false;
+            }
+        }
+
+        @JavascriptInterface
+        public synchronized boolean zipFinish() {
+            try {
+                if (zipOutStream == null) return false;
+                zipOutStream.finish();
+                zipOutStream.flush();
+                zipOutStream.close();
+                zipOutStream = null;
+                if (zipTempFile == null || !zipTempFile.exists()) return false;
+                final File tempToSave = zipTempFile;
+                final String outName = zipOutName;
+                final int total = zipEntryCount;
+                new Thread(new Runnable() {
+                    @Override
+                    public void run() {
+                        try {
+                            saveFileToPublicDownload(tempToSave, outName, "application/zip");
+                            tempToSave.delete();
+                            postToast("备份已写入 Download/" + outName + " (" + total + " entries)");
+                        } catch (Exception e) {
+                            postToast("save failed: " + e.getMessage());
+                        }
+                    }
+                }).start();
+                zipTempFile = null;
+                zipOutName = null;
+                zipEntryCount = 0;
+                return true;
+            } catch (Exception e) {
+                postToast("zipFinish failed: " + e.getMessage());
+                zipClose();
+                return false;
+            }
+        }
+
+        @JavascriptInterface
+        public synchronized void zipClose() {
+            try { if (zipOutStream != null) zipOutStream.close(); } catch (Exception ignored) {}
+            zipOutStream = null;
+            try { if (zipTempFile != null && zipTempFile.exists()) zipTempFile.delete(); } catch (Exception ignored) {}
+            zipTempFile = null;
+            zipOutName = null;
+            zipEntryCount = 0;
         }
 
         @JavascriptInterface

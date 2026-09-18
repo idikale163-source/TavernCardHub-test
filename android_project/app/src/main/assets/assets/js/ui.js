@@ -3854,7 +3854,7 @@ window.openEmojiNamerModal = function(e) {
     const frame = document.getElementById('emojiNamerFrame');
     if (container && frame) {
         if (frame.src === 'about:blank' || !frame.src) {
-            frame.src = 'https://idikale163-source.github.io/emoji-namer/';
+            frame.src = 'tools/emoji-namer.html';
         }
         container.style.display = 'flex';
         initNamerFloatingBtnDrag();
@@ -4086,26 +4086,26 @@ window.renderGalleryDetailTags = function() {
 /* ================= ZIP 导出与导入 ================= */
 async function exportAssetsAsZip() {
     try {
-        console.log('[EXPORT] 开始导出流程...');
+        console.log('[EXPORT] 开始执行流式分片导出...');
         if (typeof JSZip === 'undefined') {
-            console.error('[EXPORT] JSZip 未定义');
-            showToast('⚠️', 'JSZip 库未加载，请检查网络');
+            showToast('❌', 'JSZip 压缩组件未加载！');
             return;
         }
         showToast('⌛', '正在读取本地数据...');
         const assets = await getAllAssets();
-        console.log('[EXPORT] 获取到资产数量:', assets.length);
-        if (!assets.length) {
-            showToast('⚠️', '没有资产可导出');
+        if (!assets || !assets.length) {
+            showToast('⚠️', '本地没有任何资产可导出！');
             return;
         }
+
         const zip = new JSZip();
-        const manifest = [];
+        // === 大盘优化：不再聚合 manifest 数组（数百 MB），改为逐条序列化直接写入 ZIP ===
+        // 每条资产经 JSON.stringify 后立即 zip.file()，随后释放引用，内存峰值 = 单条大小。
+        const assetIds = [];   // 仅记录 id，用于生成轻量索引
         for (let i = 0; i < assets.length; i++) {
             const asset = assets[i];
-            if (i % 20 === 0 || i === assets.length - 1) {
-                showToast('⌛', `正在处理数据 (${i + 1}/${assets.length})...`);
-                console.log(`[EXPORT] 处理资产 [${i + 1}/${assets.length}]: ${asset.name}`);
+            if (i % 10 === 0 || i === assets.length - 1) {
+                showToast('⌛', `打包资产 (${i + 1}/${assets.length})...`);
             }
             const entry = {
                 id: asset.id,
@@ -4120,98 +4120,376 @@ async function exportAssetsAsZip() {
                 cardData: asset.cardData || null,
                 createdAt: asset.createdAt
             };
-            if (asset.cover instanceof Blob) {
-                try {
-                    const dataUrl = await new Promise((resolve, reject) => {
-                        const reader = new FileReader();
-                        reader.onload = () => resolve(reader.result);
-                        reader.onerror = reject;
-                        reader.readAsDataURL(asset.cover);
-                    });
-                    entry.cover_base64 = dataUrl;
-                } catch(e) {
-                    console.warn(`[EXPORT] 封面转 Base64 失败 (id: ${asset.id}):`, e);
-                }
-            }
-            if (asset.rawBuffer instanceof ArrayBuffer) {
-                try {
-                    const bytes = new Uint8Array(asset.rawBuffer);
-                    let binary = '';
-                    const len = bytes.byteLength;
-                    const chunk = 8192;
-                    for (let j = 0; j < len; j += chunk) {
-                        const sub = bytes.subarray(j, Math.min(j + chunk, len));
-                        binary += String.fromCharCode.apply(null, sub);
+            // === 修复：IndexedDB 取出的 cover/rawBuffer 可能是 Blob/ArrayBuffer/TypeArray/base64字符串 等多种形态 ===
+            try {
+                const cov = asset.cover;
+                if (cov) {
+                    if (typeof cov === 'string' && cov.indexOf('data:') === 0) {
+                        entry.cover_base64 = cov;
+                    } else if (cov instanceof Blob) {
+                        const dataUrl = await new Promise((resolve, reject) => {
+                            const reader = new FileReader();
+                            reader.onload = () => resolve(reader.result);
+                            reader.onerror = reject;
+                            reader.readAsDataURL(cov);
+                        });
+                        entry.cover_base64 = dataUrl;
+                    } else if (cov instanceof ArrayBuffer || ArrayBuffer.isView(cov) || (cov && cov.buffer instanceof ArrayBuffer)) {
+                        const u8 = cov instanceof ArrayBuffer ? new Uint8Array(cov)
+                                 : (ArrayBuffer.isView(cov) ? new Uint8Array(cov.buffer, cov.byteOffset, cov.byteLength)
+                                                            : new Uint8Array(cov.buffer));
+                        entry.cover_base64 = getAssetImageUrl(cov) || '';
                     }
-                    entry.raw_buffer_base64 = btoa(binary);
-                } catch(e) {
-                    console.warn(`[EXPORT] 数据流转 Base64 失败 (id: ${asset.id}):`, e);
                 }
-            }
-            const safeName = (asset.name || 'untitled').replace(/[^a-zA-Z0-9_一-鿿]/g, '_').substring(0, 50);
-            zip.file(`assets/${i}_${safeName}.json`, JSON.stringify(entry));
-            manifest.push({ index: i, id: asset.id, name: asset.name, category: asset.category });
+            } catch(e) { console.warn('[EXPORT] cover 序列化跳过:', e); }
+            // === 修复：rawBuffer 兼容 ArrayBuffer / TypedArray / base64 字符串 ===
+            try {
+                const rb = asset.rawBuffer;
+                if (rb) {
+                    if (typeof rb === 'string') {
+                        entry.rawBuffer_base64 = rb;
+                    } else {
+                        let u8 = null;
+                        if (rb instanceof ArrayBuffer) u8 = new Uint8Array(rb);
+                        else if (ArrayBuffer.isView(rb)) u8 = new Uint8Array(rb.buffer, rb.byteOffset, rb.byteLength);
+                        else if (rb.buffer instanceof ArrayBuffer) u8 = new Uint8Array(rb.buffer);
+                        if (u8 && u8.byteLength) {
+                            let binary = '';
+                            const chunk = 8192;
+                            for (let j = 0; j < u8.length; j += chunk) {
+                                const sub = u8.subarray(j, Math.min(j + chunk, u8.length));
+                                binary += String.fromCharCode.apply(null, sub);
+                            }
+                            entry.rawBuffer_base64 = btoa(binary);
+                        }
+                    }
+                }
+            } catch(e) { console.warn('[EXPORT] rawBuffer 序列化跳过:', e); }
+            // 立即落盘到 ZIP，避免在内存里堆积整个 manifest
+            const safeId = String(entry.id || ('asset_' + i)).replace(/[^A-Za-z0-9_-]/g, '_');
+            const entryStr = JSON.stringify(entry);
+            zip.file('assets/' + safeId + '.json', entryStr);
+            assetIds.push(safeId);
+            // 每 50 条让出主线程，避免长任务阻塞
+            if (i % 50 === 0) await new Promise(r => setTimeout(r, 0));
         }
 
-        const folderConfig = {};
-        ['cards', 'gallery', 'links', 'themes', 'fonts', 'apikeys', 'custom'].forEach(cat => {
-            const stored = localStorage.getItem('TAVERN_CUSTOM_FOLDERS_' + cat);
-            if (stored) folderConfig[cat] = JSON.parse(stored);
-        });
-        zip.file('_manifest.json', JSON.stringify({
-            version: 1,
-            exportedAt: Date.now(),
-            count: assets.length,
-            manifest: manifest,
-            customFolders: folderConfig
-        }, null, 2));
-
-        console.log('[EXPORT] 所有文件已装载，开始压缩打包 (zip.generateAsync)...');
-        showToast('⌛', '正在压缩打包生成 ZIP...');
-        
-        const blob = await zip.generateAsync({
-            type: 'blob',
-            compression: 'DEFLATE',
-            useWebWorkers: false
-        }, (metadata) => {
-            if (metadata.percent) {
-                showToast('⌛', `压缩进度: ${metadata.percent.toFixed(0)}%`);
-                console.log(`[EXPORT] 压缩进度: ${metadata.percent.toFixed(1)}%`);
+        // === 轻量索引 ===
+        // 资产正文已逐条写入 assets/<id>.json，此处只生成一个极小的文件清单，
+        // 体积与资产数量成正比(每条约 40 字节)，不再产生数百 MB 的巨型字符串。
+        const indexJson = JSON.stringify({ version: 3, count: assetIds.length, assets: assetIds });
+        zip.file('manifest.json', indexJson);
+        zip.file('_manifest.json', indexJson);
+        try {
+            const extraData = {};
+            const SKIP = /^(TAVERN_TMP_|debug_|__)/;
+            for (let i = 0; i < localStorage.length; i++) {
+                const k = localStorage.key(i);
+                if (!k || SKIP.test(k)) continue;
+                const val = localStorage.getItem(k);
+                if (val !== null && val.length < 5 * 1024 * 1024) extraData[k] = val;
             }
-        });
+            zip.file('app_extra_config.json', JSON.stringify(extraData, null, 2));
 
-        console.log('[EXPORT] 压缩完成，文件大小:', (blob.size / 1024 / 1024).toFixed(2), 'MB');
+            // === 导出其他 IndexedDB（角色卡v2 工坊 keyval-store / 字体预览箱）===
+            // v2 工坊位于同源 about:blank iframe，其 idb-keyval 数据就存在本页 IndexedDB 环境。
+            try {
+                const extraDbs = ['keyval-store', 'FontPreviewBox'];
+                const dbDump = {};
+                for (const dbName of extraDbs) {
+                    const dump = await new Promise((resolve) => {
+                        let req;
+                        try { req = indexedDB.open(dbName); } catch(e) { resolve(null); return; }
+                        req.onsuccess = () => {
+                            const db = req.result;
+                            const storeNames = [...db.objectStoreNames];
+                            if (!storeNames.length) { db.close(); resolve({ name: dbName, version: db.version, stores: {} }); return; }
+                            const result = { name: dbName, version: db.version, stores: {} };
+                            let pending = storeNames.length;
+                            storeNames.forEach((sn) => {
+                                try {
+                                    const tx = db.transaction(sn, 'readonly');
+                                    const st = tx.objectStore(sn);
+                                    const all = st.getAll();
+                                    const keyReq = st.getAllKeys();
+                                    all.onsuccess = () => {
+                                        keyReq.onsuccess = () => {
+                                            result.stores[sn] = { keys: keyReq.result, values: all.result };
+                                            if (--pending === 0) { db.close(); resolve(result); }
+                                        };
+                                        keyReq.onerror = () => { if (--pending === 0) { db.close(); resolve(result); } };
+                                    };
+                                    all.onerror = () => { if (--pending === 0) { db.close(); resolve(result); } };
+                                } catch(e) {
+                                    if (--pending === 0) { db.close(); resolve(result); }
+                                }
+                            });
+                        };
+                        req.onerror = () => resolve(null);
+                        req.onblocked = () => resolve(null);
+                        // 不触发 onupgradeneeded 建库；若库不存在则直接放弃
+                        req.onupgradeneeded = () => { try { req.result.close(); } catch(e) {} resolve(null); };
+                    });
+                    if (dump && dump.stores && Object.keys(dump.stores).length) {
+                        // 只保留有数据的库
+                        const hasAny = Object.values(dump.stores).some(x => x && x.values && x.values.length);
+                        if (hasAny) dbDump[dbName] = dump;
+                    }
+                }
+                if (Object.keys(dbDump).length) {
+                    zip.file('extra_indexeddb.json', JSON.stringify(dbDump));
+                    console.log('[EXPORT] 附带 IndexedDB:', Object.keys(dbDump).join(', '));
+                }
+            } catch(e) { console.warn('[EXPORT] 额外 IndexedDB 导出跳过:', e); }
+
+            const customFolders = {};
+            for (let i = 0; i < localStorage.length; i++) {
+                const k = localStorage.key(i);
+                if (k && k.indexOf('TAVERN_CUSTOM_FOLDERS_') === 0) {
+                    try { customFolders[k.replace('TAVERN_CUSTOM_FOLDERS_', '')] = JSON.parse(localStorage.getItem(k)); } catch(e) {}
+                }
+            }
+            zip.file('_meta.json', JSON.stringify({ customFolders: customFolders, exportedAt: Date.now(), version: 2 }, null, 2));
+        } catch(e) { console.warn('[EXPORT] 配置导出异常:', e); }
+
         const ts = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
         const filename = `ResourceHub_Backup_${ts}.zip`;
 
-        if (window.AndroidApp && typeof window.AndroidApp.saveBase64File === 'function') {
-            console.log('[EXPORT] 检测到 AndroidApp 桥接，准备调用 saveBase64File');
-            showToast('⌛', '正在保存到手机存储...');
-            const reader = new FileReader();
-            reader.onloadend = function() {
-                try {
-                    const base64 = reader.result.split(',')[1];
-                    window.AndroidApp.saveBase64File(base64, filename, 'application/zip');
-                    showToast('🎉', `已导出 ${assets.length} 个资产 (${(blob.size / 1024 / 1024).toFixed(1)}MB) 到 Download`);
-                } catch(e) {
-                    console.error('[EXPORT] Java 桥接保存抛错:', e);
-                    showToast('❌', `保存失败: ${e.message || e}`);
+        // === 关键：APK/WebView 环境下不再用 generateAsync({type:'blob'}) ===
+        // 该方式会把整个 ZIP 在内存中拼装完成，数百 MB 数据 + DEFLATE 压缩峰值可达 1GB+，
+        // 必然触发 WebView OOM 假死。改为 streamFiles 流式生成 + 逐块经原生桥落盘。
+        const hasNativeBridge = !!(window.AndroidApp && typeof window.AndroidApp.writeChunk === 'function');
+        const canStream = typeof zip.generateInternalStream === 'function';
+
+        // === 优先级 1：原生 ZipOutputStream（内存恒定，支持任意大小）===
+        if (window.AndroidApp && typeof window.AndroidApp.zipStart === 'function') {
+            try {
+                showToast('⌛', '正在用原生引擎流式打包...');
+                const okStart = window.AndroidApp.zipStart(filename);
+                if (!okStart) throw new Error('zipStart 返回失败');
+
+                // 逐条写入：每条经 JSON.stringify -> base64 -> Java 落盘
+                // 内存峰值 = 单条大小，不再随总量增长
+                for (let i = 0; i < assets.length; i++) {
+                    const e = assets[i];
+                    const safeId = String(e.id || ('asset_' + i)).replace(/[^A-Za-z0-9_-]/g, '_');
+                    const jsonStr = JSON.stringify(e);
+                    const b64 = btoa(unescape(encodeURIComponent(jsonStr)));
+                    const ok = window.AndroidApp.zipAddFile('assets/' + safeId + '.json', b64);
+                    if (!ok) throw new Error('写入 ' + safeId + ' 失败');
+                    if (i % 20 === 0 || i === assets.length - 1) {
+                        showToast('⌛', `原生打包资产 (${i + 1}/${assets.length})...`);
+                        await new Promise(r => setTimeout(r, 0));
+                    }
                 }
-            };
-            reader.readAsDataURL(blob);
-        } else {
-            console.log('[EXPORT] 浏览器环境，触发 a.click 下载');
-            const a = document.createElement('a');
-            a.href = URL.createObjectURL(blob);
-            a.download = filename;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            setTimeout(() => URL.revokeObjectURL(a.href), 10000);
-            showToast('🎉', `已导出 ${assets.length} 个资产 (${(blob.size / 1024 / 1024).toFixed(1)}MB)`);
+
+                // 索引与配置
+                const indexJson = JSON.stringify({ version: 3, count: assets.length, assets: assets.map(e => String(e.id || '').replace(/[^A-Za-z0-9_-]/g, '_')) });
+                window.AndroidApp.zipAddFile('manifest.json', btoa(unescape(encodeURIComponent(indexJson))));
+                window.AndroidApp.zipAddFile('_manifest.json', btoa(unescape(encodeURIComponent(indexJson))));
+
+                try {
+                    const extraData = {};
+                    const SKIP = /^(TAVERN_TMP_|debug_|__)/;
+                    for (let i = 0; i < localStorage.length; i++) {
+                        const k = localStorage.key(i);
+                        if (!k || SKIP.test(k)) continue;
+                        const val = localStorage.getItem(k);
+                        if (val !== null && val.length < 5 * 1024 * 1024) extraData[k] = val;
+                    }
+                    window.AndroidApp.zipAddFile('app_extra_config.json', btoa(unescape(encodeURIComponent(JSON.stringify(extraData)))));
+                    const customFolders = {};
+                    for (let i = 0; i < localStorage.length; i++) {
+                        const k = localStorage.key(i);
+                        if (k && k.indexOf('TAVERN_CUSTOM_FOLDERS_') === 0) {
+                            try { customFolders[k.replace('TAVERN_CUSTOM_FOLDERS_', '')] = JSON.parse(localStorage.getItem(k)); } catch(e) {}
+                        }
+                    }
+                    window.AndroidApp.zipAddFile('_meta.json', btoa(unescape(encodeURIComponent(JSON.stringify({ customFolders: customFolders, exportedAt: Date.now(), version: 3 })))));
+                } catch(e) { console.warn('[EXPORT] 配置写入跳过:', e); }
+
+                // 额外 IndexedDB（v2 工坊 / 字体）
+                try {
+                    const extraDbs = ['keyval-store', 'FontPreviewBox'];
+                    const dbDump = {};
+                    for (const dbName of extraDbs) {
+                        const dump = await new Promise((resolve) => {
+                            let req;
+                            try { req = indexedDB.open(dbName); } catch(e) { resolve(null); return; }
+                            req.onsuccess = () => {
+                                const db = req.result;
+                                const storeNames = [...db.objectStoreNames];
+                                if (!storeNames.length) { db.close(); resolve(null); return; }
+                                const result = { name: dbName, version: db.version, stores: {} };
+                                let pending = storeNames.length;
+                                storeNames.forEach((sn) => {
+                                    try {
+                                        const tx = db.transaction(sn, 'readonly');
+                                        const st = tx.objectStore(sn);
+                                        const all = st.getAll();
+                                        const keyReq = st.getAllKeys();
+                                        all.onsuccess = () => {
+                                            keyReq.onsuccess = () => {
+                                                result.stores[sn] = { keys: keyReq.result, values: all.result };
+                                                if (--pending === 0) { db.close(); resolve(result); }
+                                            };
+                                            keyReq.onerror = () => { if (--pending === 0) { db.close(); resolve(result); } };
+                                        };
+                                        all.onerror = () => { if (--pending === 0) { db.close(); resolve(result); } };
+                                    } catch(e) { if (--pending === 0) { db.close(); resolve(result); } }
+                                });
+                            };
+                            req.onerror = () => resolve(null);
+                            req.onblocked = () => resolve(null);
+                            req.onupgradeneeded = () => { try { req.result.close(); } catch(e) {} resolve(null); };
+                        });
+                        if (dump && dump.stores && Object.keys(dump.stores).length) {
+                            const hasAny = Object.values(dump.stores).some(x => x && x.values && x.values.length);
+                            if (hasAny) dbDump[dbName] = dump;
+                        }
+                    }
+                    if (Object.keys(dbDump).length) {
+                        window.AndroidApp.zipAddFile('extra_indexeddb.json', btoa(unescape(encodeURIComponent(JSON.stringify(dbDump)))));
+                    }
+                } catch(e) { console.warn('[EXPORT] 额外 IndexedDB 跳过:', e); }
+
+                showToast('⌛', '正在生成 ZIP 并写入 Download...');
+                window.AndroidApp.zipFinish();
+                return;
+            } catch(err) {
+                console.error('[EXPORT] 原生模式失败，回退 JSZip:', err);
+                showToast('⚠️', '原生打包失败，回退兼容模式...');
+                try { if (window.AndroidApp.zipClose) window.AndroidApp.zipClose(); } catch(e) {}
+            }
         }
+
+        if (hasNativeBridge && canStream) {
+            showToast('⌛', '正在流式打包（边压缩边写盘）...');
+            const stream = zip.generateInternalStream({
+                type: 'uint8array',
+                compression: 'STORE',          // 不再 DEFLATE：省内存、防 OOM、速度极快（磁盘足够）
+                streamFiles: true
+            });
+            let sendBuf = new Uint8Array(0);   // 聚合到 256KB 再通过桥发送
+            let chunkIndex = 0;
+            const SEND_SIZE = 256 * 1024;
+            let lastError = null;
+
+            await new Promise((resolve) => {
+                stream.on('data', (data, meta) => {
+                    // 累积数据，攒够 SEND_SIZE 再发一包
+                    const merged = new Uint8Array(sendBuf.length + data.length);
+                    merged.set(sendBuf, 0);
+                    merged.set(data, sendBuf.length);
+                    sendBuf = merged;
+                    while (sendBuf.length >= SEND_SIZE) {
+                        const sub = sendBuf.subarray(0, SEND_SIZE);
+                        let binary = '';
+                        for (let j = 0; j < sub.length; j += 8192) {
+                            binary += String.fromCharCode.apply(null, sub.subarray(j, Math.min(j + 8192, sub.length)));
+                        }
+                        const ok = window.AndroidApp.writeChunk(btoa(binary), chunkIndex === 0, false, filename);
+                        if (!ok) { lastError = '分片写入失败'; break; }
+                        chunkIndex++;
+                        sendBuf = sendBuf.subarray(SEND_SIZE).slice();
+                    }
+                    if (meta && meta.percent) {
+                        window.__zipPct = meta.percent;
+                    }
+                });
+                stream.on('error', (err) => { lastError = err && err.message ? err.message : String(err); resolve(); });
+                stream.on('end', () => resolve());
+                stream.resume();
+            });
+
+            if (lastError) {
+                showToast('❌', `导出失败: ${lastError}`);
+                return;
+            }
+
+            // 冲刷尾部残余，并标记最后一片触发落盘
+            let tailBinary = '';
+            for (let j = 0; j < sendBuf.length; j += 8192) {
+                tailBinary += String.fromCharCode.apply(null, sendBuf.subarray(j, Math.min(j + 8192, sendBuf.length)));
+            }
+            const finalData = sendBuf.length ? btoa(tailBinary) : '';
+            window.AndroidApp.writeChunk(finalData, chunkIndex === 0, true, filename);
+            showToast('🎉', `总备份已成功写入：Download/${filename}`);
+            return;
+        }
+
+        // ---- 非 APK 环境（普通浏览器）：仍走 Blob 下载 ----
+        showToast('⌛', '正在压缩打包成 ZIP...');
+        const blob = await zip.generateAsync({
+            type: 'blob',
+            compression: 'STORE',
+            streamFiles: true
+        }, (metadata) => {
+            if (metadata.percent) {
+                showToast('⌛', `压缩进度: ${metadata.percent.toFixed(0)}%`);
+            }
+        });
+
+        // === 大文件安全导出：Blob.slice() 逐块读取，绝不一次性载入整个 ZIP ===
+        // 旧实现在此调用 blob.arrayBuffer()，会把整个 ZIP(可达数百MB) 读入内存，
+        // 叠加 base64 膨胀后必然 OOM / 卡死。现改为 1MB 切片 + 256KB 逐包刷盘。
+        if (window.AndroidApp && typeof window.AndroidApp.writeChunk === 'function') {
+            const READ_SIZE = 1024 * 1024;        // 每次从 Blob 读 1MB
+            const SEND_SIZE = 256 * 1024;         // 每次通过桥传 256KB
+            const totalSize = blob.size;
+            let chunkIndex = 0;
+            let carry = new Uint8Array(0);
+            showToast('⌛', `开始流式导出 (${(totalSize / 1048576).toFixed(1)} MB)...`);
+            for (let offset = 0; offset < totalSize; offset += READ_SIZE) {
+                const sliceBlob = blob.slice(offset, Math.min(offset + READ_SIZE, totalSize));
+                const piece = new Uint8Array(await sliceBlob.arrayBuffer());   // 单次最多 1MB
+                let buf;
+                if (carry.length) {
+                    buf = new Uint8Array(carry.length + piece.length);
+                    buf.set(carry, 0);
+                    buf.set(piece, carry.length);
+                } else {
+                    buf = piece;
+                }
+                let pos = 0;
+                while (buf.length - pos >= SEND_SIZE) {
+                    const sub = buf.subarray(pos, pos + SEND_SIZE);
+                    let binary = '';
+                    for (let j = 0; j < sub.length; j += 8192) {
+                        binary += String.fromCharCode.apply(null, sub.subarray(j, Math.min(j + 8192, sub.length)));
+                    }
+                    const ok = window.AndroidApp.writeChunk(btoa(binary), chunkIndex === 0, false, filename);
+                    if (!ok) { showToast('❌', '分片写入失败，导出中止'); return; }
+                    chunkIndex++;
+                    pos += SEND_SIZE;
+                    if (chunkIndex % 8 === 0) {
+                        showToast('⌛', `流式刷盘: ${Math.round(Math.min(100, (offset + pos) / totalSize * 100))}%`);
+                        await new Promise(r => setTimeout(r, 0));   // 让出主线程，避免 WebView 假死
+                    }
+                }
+                carry = buf.subarray(pos).slice();
+            }
+            // 冲刷最后的残余字节（标记为最后一片，触发落盘）
+            let tailBinary = '';
+            for (let j = 0; j < carry.length; j += 8192) {
+                tailBinary += String.fromCharCode.apply(null, carry.subarray(j, Math.min(j + 8192, carry.length)));
+            }
+            window.AndroidApp.writeChunk(carry.length ? btoa(tailBinary) : '', chunkIndex === 0, true, filename);
+            showToast('🎉', `总备份已成功写入：Download/${filename}`);
+            return;
+        }
+
+        // Web 降级
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 5000);
+        showToast('🎉', `已通过下载链接导出：${filename}`);
     } catch (err) {
-        console.error('[EXPORT] 导出全流程异常:', err);
+        console.error('[EXPORT] 导出失败:', err);
         showToast('❌', `导出失败: ${err.message || err}`);
     }
 }
@@ -4233,22 +4511,146 @@ async function importAssetsFromZip() {
             }
             showToast('⌛', '正在解压导入...');
             const zip = await JSZip.loadAsync(file);
-            const manifestFile = zip.file('_manifest.json');
-            if (!manifestFile) {
+            // === 兼容读取三种格式 ===
+            //  v1: manifest.json 是「资产对象数组」（数百 MB 巨型文件）
+            //  v3: manifest.json 是「id 索引」，正文在 assets/<id>.json（流式导出）
+            //  无清单: 直接扫描 assets/*.json
+            let entries = [];
+            const mf = zip.file('_manifest.json') || zip.file('manifest.json');
+            let indexList = null;
+            if (mf) {
+                try {
+                    const parsed = JSON.parse(await mf.async('string'));
+                    if (Array.isArray(parsed)) {
+                        // v1：直接就是资产数组
+                        if (parsed.length && parsed[0] && typeof parsed[0] === 'object' && (parsed[0].id || parsed[0].name)) {
+                            entries = parsed;
+                        } else {
+                            indexList = parsed.map(x => String(x).replace(/[^A-Za-z0-9_-]/g, '_'));
+                        }
+                    } else if (parsed && Array.isArray(parsed.assets)) {
+                        // v3：{version, count, assets:[id,...]}
+                        const first = parsed.assets[0];
+                        if (first && typeof first === 'object') entries = parsed.assets;
+                        else indexList = parsed.assets.map(x => String(x).replace(/[^A-Za-z0-9_-]/g, '_'));
+                    }
+                } catch(e) { console.warn('[IMPORT] 清单解析失败，回退扫描:', e); }
+            }
+            // 索引模式：按 id 读取 assets/<id>.json
+            if ((!entries || !entries.length) && indexList && indexList.length) {
+                let miss = 0;
+                for (let i = 0; i < indexList.length; i++) {
+                    const f = zip.file('assets/' + indexList[i] + '.json');
+                    if (!f) { miss++; continue; }
+                    try { entries.push(JSON.parse(await f.async('string'))); } catch(e) { miss++; }
+                    if (i % 100 === 0) {
+                        showToast('⌛', `读取资产 ${i + 1}/${indexList.length}...`);
+                        await new Promise(r => setTimeout(r, 0));
+                    }
+                }
+                if (miss) console.warn('[IMPORT] 有 ' + miss + ' 条索引未找到对应文件');
+            }
+            // 兜底：直接扫描 assets/*.json
+            if (!entries || !entries.length) {
+                const assetFiles = Object.keys(zip.files).filter(f => f.startsWith('assets/') && f.endsWith('.json'));
+                for (let i = 0; i < assetFiles.length; i++) {
+                    try { entries.push(JSON.parse(await zip.files[assetFiles[i]].async('string'))); } catch(e) {}
+                    if (i % 100 === 0) {
+                        showToast('⌛', `扫描资产 ${i + 1}/${assetFiles.length}...`);
+                        await new Promise(r => setTimeout(r, 0));
+                    }
+                }
+            }
+            if (!entries || !entries.length) {
                 showToast('❌', '不是有效的 ResourceHub 备份文件');
                 return;
             }
-            const manifestData = JSON.parse(await manifestFile.async('string'));
-            // 恢复自定义文件夹
-            if (manifestData.customFolders) {
-                for (let cat in manifestData.customFolders) {
-                    localStorage.setItem('TAVERN_CUSTOM_FOLDERS_' + cat, JSON.stringify(manifestData.customFolders[cat]));
+            // 恢复自定义文件夹（新格式在 _meta.json，旧格式在清单里）
+            let metaObj = null;
+            const metaFile = zip.file('_meta.json');
+            if (metaFile) { try { metaObj = JSON.parse(await metaFile.async('string')); } catch(e) {} }
+            const cfSource = (metaObj && metaObj.customFolders) || (entries.customFolders) || null;
+            if (cfSource) {
+                for (let cat in cfSource) {
+                    localStorage.setItem('TAVERN_CUSTOM_FOLDERS_' + cat, JSON.stringify(cfSource[cat]));
                 }
+                if (typeof renderCustomFolders === 'function') { try { renderCustomFolders(); } catch(e) {} }
             }
+            // 恢复 localStorage 配置（图床/主题/预设等）
+            const cfgFile = zip.file('app_extra_config.json');
+            if (cfgFile) {
+                try {
+                    const cfg = JSON.parse(await cfgFile.async('string'));
+                    let restored = 0;
+                    for (const k in cfg) {
+                        if (typeof cfg[k] === 'string') { localStorage.setItem(k, cfg[k]); restored++; }
+                    }
+                    if (restored) showToast('ℹ️', `已恢复 ${restored} 项配置`);
+                } catch(e) { console.warn('[IMPORT] 配置恢复跳过:', e); }
+            }
+            // === 恢复其他 IndexedDB（角色卡v2 工坊 / 字体预览箱）===
+            const extraDbFile = zip.file('extra_indexeddb.json');
+            if (extraDbFile) {
+                try {
+                    const dbDump = JSON.parse(await extraDbFile.async('string'));
+                    let restoredDbs = [];
+                    for (const dbName in dbDump) {
+                        const info = dbDump[dbName];
+                        if (!info || !info.stores) continue;
+                        const storeEntries = Object.entries(info.stores).filter(([sn, v]) => v && v.values && v.values.length);
+                        if (!storeEntries.length) continue;
+                        await new Promise((resolve) => {
+                            const req = indexedDB.open(dbName, info.version || undefined);
+                            req.onupgradeneeded = () => {
+                                const db = req.result;
+                                storeEntries.forEach(([sn]) => {
+                                    if (!db.objectStoreNames.contains(sn)) db.createObjectStore(sn);
+                                });
+                            };
+                            req.onsuccess = () => {
+                                const db = req.result;
+                                const needCreate = storeEntries.filter(([sn]) => !db.objectStoreNames.contains(sn));
+                                if (needCreate.length) {
+                                    // 需要升级版本才能建表
+                                    const newVer = db.version + 1;
+                                    db.close();
+                                    const up = indexedDB.open(dbName, newVer);
+                                    up.onupgradeneeded = () => {
+                                        const d2 = up.result;
+                                        needCreate.forEach(([sn]) => { if (!d2.objectStoreNames.contains(sn)) d2.createObjectStore(sn); });
+                                    };
+                                    up.onsuccess = () => { writeStores(up.result, storeEntries, resolve); };
+                                    up.onerror = () => resolve();
+                                } else {
+                                    writeStores(db, storeEntries, resolve);
+                                }
+                            };
+                            req.onerror = () => resolve();
+                        });
+                        restoredDbs.push(dbName);
+                    }
+                    function writeStores(db, storeEntries, done) {
+                        try {
+                            const tx = db.transaction(storeEntries.map(([sn]) => sn), 'readwrite');
+                            storeEntries.forEach(([sn, v]) => {
+                                const st = tx.objectStore(sn);
+                                (v.keys || []).forEach((k, idx) => {
+                                    try { st.put(v.values[idx], k); } catch(e) {}
+                                });
+                            });
+                            tx.oncomplete = () => { db.close(); done(); };
+                            tx.onerror = () => { db.close(); done(); };
+                            tx.onabort = () => { db.close(); done(); };
+                        } catch(e) { try { db.close(); } catch(_) {} done(); }
+                    }
+                    if (restoredDbs.length) showToast('ℹ️', `已恢复 ${restoredDbs.length} 个扩展数据库`);
+                } catch(e) { console.warn('[IMPORT] 扩展 IndexedDB 恢复跳过:', e); }
+            }
+
+            const total = entries.length;
             let imported = 0;
-            const assetFiles = Object.keys(zip.files).filter(f => f.startsWith('assets/') && f.endsWith('.json'));
-            for (let i = 0; i < assetFiles.length; i++) {
-                const entry = JSON.parse(await zip.files[assetFiles[i]].async('string'));
+            for (let i = 0; i < total; i++) {
+                const entry = entries[i];
                 const asset = {
                     id: entry.id,
                     category: entry.category,
@@ -4273,10 +4675,11 @@ async function importAssetsFromZip() {
                         asset.cover = new Blob([nbytes], { type: mime });
                     } catch(e) { console.warn('cover restore failed', e); }
                 }
-                // 从 base64 还原 rawBuffer
-                if (entry.raw_buffer_base64) {
+                // 从 base64 还原 rawBuffer（兼容两种字段命名）
+                const rb64 = entry.rawBuffer_base64 || entry.raw_buffer_base64;
+                if (rb64) {
                     try {
-                        const bstr = atob(entry.raw_buffer_base64);
+                        const bstr = atob(String(rb64).replace(/^data:[^;]+;base64,/, ''));
                         let nbytes = new Uint8Array(bstr.length);
                         for (let j = 0; j < bstr.length; j++) nbytes[j] = bstr.charCodeAt(j);
                         asset.rawBuffer = nbytes.buffer;
@@ -4285,7 +4688,7 @@ async function importAssetsFromZip() {
                 await saveAsset(asset);
                 imported++;
                 if (imported % 20 === 0) {
-                    showToast('⌛', `已导入 ${imported}/${assetFiles.length}...`);
+                    showToast('⌛', `已导入 ${imported}/${total}...`);
                 }
             }
             allAssetsCache = null;
@@ -4320,8 +4723,15 @@ window.openCharacterV2Modal = function(e) {
     const container = document.getElementById('characterV2IframeContainer');
     const frame = document.getElementById('characterV2Frame');
     if (container && frame) {
-        if (frame.src === 'about:blank' || !frame.src || frame.src.endsWith('about:blank')) {
-            frame.src = 'https://character-v2.vercel.app/';
+        // 强制刷新并附带时间戳，杜绝任何历史缓存与空白挂死
+        // 注意：网页端 Vercel 开启了 cleanUrls，请求显式 index.html 会被 308 重定向，导致 iframe 白屏。
+        // 因此网页端统一使用目录形式（/tools/character-v2/?t=...），file:// 环境仍用 index.html。
+        const isFileProto = window.location.protocol === 'file:' || !window.location.origin || window.location.origin === 'null';
+        const targetUrl = isFileProto
+            ? ('tools/character-v2/index.html?t=' + Date.now())
+            : (window.location.origin + '/tools/character-v2/?t=' + Date.now());
+        if (frame.src !== targetUrl) {
+            frame.src = targetUrl;
         }
         container.style.display = 'flex';
         initCharacterV2FloatingBtnDrag();

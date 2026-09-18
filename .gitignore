@@ -1,2 +1,10 @@
 .vercel
 .env*
+
+# Android build
+android_project/.gradle/
+android_project/build/
+android_project/app/build/
+android_project/local.properties
+*.iml
+.idea/

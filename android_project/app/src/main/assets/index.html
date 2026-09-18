@@ -1,4 +1,4 @@
-<!-- BUILD_VER_STAMP: 1789462939 -->
+<!-- BUILD_VER_STAMP: 1789465651 -->
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -38,7 +38,7 @@
     <!-- Supabase JS Client (multi-CDN fallback) -->
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"
         onerror="var s=document.createElement('script');s.src='https://unpkg.com/@supabase/supabase-js@2';s.onerror=function(){var t=document.createElement('script');t.src='https://cdnjs.cloudflare.com/ajax/libs/supabase-js/2.39.0/umd/supabase.min.js';document.head.appendChild(t);};document.head.appendChild(s);"></script>
-    <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js" onerror="var s=document.createElement('script');s.src='vendor/jszip.min.js';document.head.appendChild(s);"></script>
     <link rel="stylesheet" href="assets/css/main.css?v=1786377509">
 
 <style id="test-gray-pink-overrides">
@@ -50,6 +50,31 @@
 #linksBuilderPanel .text-[#2563eb], #linksBuilderPanel .text-[#1e40af] { color:#9b6875 !important; }
 #linksBuilderPanel .bg-[#2563eb] { background:#c98294 !important; }
 </style>
+
+    <style id="rh-anti-blackbar-master">
+      html, body {
+        margin: 0 !important;
+        padding: 0 !important;
+        width: 100% !important;
+        height: 100% !important;
+        background-color: #fdfbf7 !important;
+        -webkit-tap-highlight-color: transparent !important;
+      }
+      /* 强制消除 WebView 顶部状态栏与刘海留白 */
+      body {
+        padding-top: env(safe-area-inset-top, 0px) !important;
+        padding-bottom: env(safe-area-inset-bottom, 0px) !important;
+      }
+      #characterV2IframeContainer {
+        position: fixed !important;
+        inset: 0 !important;
+        width: 100vw !important;
+        height: 100vh !important;
+        z-index: 9999 !important;
+        background-color: #f4f4f5 !important;
+      }
+    </style>
+    
 </head>
 <body class="h-screen flex flex-col overflow-hidden bg-[#faf6f0]">
 
@@ -887,8 +912,8 @@
     <script src="assets/js/core.js?v=1786377509"></script>
     <script src="assets/js/sync.js?v=1786377509"></script>
     <script src="assets/js/apikeys.js?v=1786377509"></script>
-    <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
-    <script src="assets/js/ui.js?v=1789381000"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js" onerror="var s=document.createElement('script');s.src='vendor/jszip.min.js';document.head.appendChild(s);"></script>
+    <script src="assets/js/ui.js?v=1789743692"></script>
     <script src="assets/js/links.js?v=1786377509"></script>
     <script src="assets/js/font.js?v=1786377509"></script>
     <script src="assets/js/sandbox.js?v=1787168888888"></script>
@@ -929,7 +954,7 @@
 
 
     <!-- 角色卡v2 (cunchu) 独立隔离全屏模态 -->
-    <div id="characterV2IframeContainer" class="fixed inset-0 z-[999] bg-[#000000] flex-col overflow-hidden" style="display: none;">
+    <div id="characterV2IframeContainer" class="fixed inset-0 z-[999] bg-[#f4f4f5] flex-col overflow-hidden" style="display: none;">
         <div id="characterV2FloatingBackBtn" onclick="handleCharacterV2BackClick(event)" class="fixed z-[1000] bg-black/60 hover:bg-black/85 active:scale-90 backdrop-blur-md text-white/90 hover:text-white text-[11px] font-medium px-2.5 py-1 rounded-full shadow-lg border border-white/15 flex items-center gap-1 cursor-grab active:cursor-grabbing select-none transition-opacity opacity-75 hover:opacity-100" style="top: 14px; left: 14px; touch-action: none;">
             <span class="text-xs">‹</span>
             <span>返回</span>
