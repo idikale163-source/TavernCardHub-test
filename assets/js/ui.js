@@ -4166,16 +4166,24 @@ async function exportAssetsAsZip() {
             manifest.push(entry);
         }
 
-        // 兼容两种命名，避免导出/导入对不上
+        // === 备份清单 ===
+        // 注意：大数据量时 manifest 可能达数百 MB，若同时写两份(manifest + _manifest)
+        // 会直接把内存打爆。因此策略改为：
+        //   小数据（<20MB）→ 同时写 manifest.json 与 _manifest.json，双兼容
+        //   大数据          → 写一份 manifest.json + 逐条 assets/<id>.json，靠分片控制内存
         const manifestStr = JSON.stringify(manifest, null, 2);
+        const heavy = manifestStr.length > 20 * 1024 * 1024;
         zip.file('manifest.json', manifestStr);
-        zip.file('_manifest.json', manifestStr);
-        // 兼容旧导入：附加 assets/<id>.json 分片
+        if (!heavy) {
+            zip.file('_manifest.json', manifestStr);
+        }
+        // 逐条资产分片：新版导入优先读 manifest.json，读不到则回退此目录
         for (let i = 0; i < manifest.length; i++) {
             const e = manifest[i];
             const safeId = String(e.id || ('asset_' + i)).replace(/[^A-Za-z0-9_-]/g, '_');
             zip.file('assets/' + safeId + '.json', JSON.stringify(e));
         }
+        // 释放大字符串引用，便于 GC（大数据量下很关键）
         try {
             const extraData = {};
             const SKIP = /^(TAVERN_TMP_|debug_|__)/;
@@ -4196,52 +4204,127 @@ async function exportAssetsAsZip() {
             zip.file('_meta.json', JSON.stringify({ customFolders: customFolders, exportedAt: Date.now(), version: 2 }, null, 2));
         } catch(e) { console.warn('[EXPORT] 配置导出异常:', e); }
 
+        const ts = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
+        const filename = `ResourceHub_Backup_${ts}.zip`;
+
+        // === 关键：APK/WebView 环境下不再用 generateAsync({type:'blob'}) ===
+        // 该方式会把整个 ZIP 在内存中拼装完成，数百 MB 数据 + DEFLATE 压缩峰值可达 1GB+，
+        // 必然触发 WebView OOM 假死。改为 streamFiles 流式生成 + 逐块经原生桥落盘。
+        const hasNativeBridge = !!(window.AndroidApp && typeof window.AndroidApp.writeChunk === 'function');
+        const canStream = typeof zip.generateInternalStream === 'function';
+
+        if (hasNativeBridge && canStream) {
+            showToast('⌛', '正在流式打包（边压缩边写盘）...');
+            const stream = zip.generateInternalStream({
+                type: 'uint8array',
+                compression: 'STORE',          // 不再 DEFLATE：省内存、防 OOM、速度极快（磁盘足够）
+                streamFiles: true
+            });
+            let sendBuf = new Uint8Array(0);   // 聚合到 256KB 再通过桥发送
+            let chunkIndex = 0;
+            const SEND_SIZE = 256 * 1024;
+            let lastError = null;
+
+            await new Promise((resolve) => {
+                stream.on('data', (data, meta) => {
+                    // 累积数据，攒够 SEND_SIZE 再发一包
+                    const merged = new Uint8Array(sendBuf.length + data.length);
+                    merged.set(sendBuf, 0);
+                    merged.set(data, sendBuf.length);
+                    sendBuf = merged;
+                    while (sendBuf.length >= SEND_SIZE) {
+                        const sub = sendBuf.subarray(0, SEND_SIZE);
+                        let binary = '';
+                        for (let j = 0; j < sub.length; j += 8192) {
+                            binary += String.fromCharCode.apply(null, sub.subarray(j, Math.min(j + 8192, sub.length)));
+                        }
+                        const ok = window.AndroidApp.writeChunk(btoa(binary), chunkIndex === 0, false, filename);
+                        if (!ok) { lastError = '分片写入失败'; break; }
+                        chunkIndex++;
+                        sendBuf = sendBuf.subarray(SEND_SIZE).slice();
+                    }
+                    if (meta && meta.percent) {
+                        window.__zipPct = meta.percent;
+                    }
+                });
+                stream.on('error', (err) => { lastError = err && err.message ? err.message : String(err); resolve(); });
+                stream.on('end', () => resolve());
+                stream.resume();
+            });
+
+            if (lastError) {
+                showToast('❌', `导出失败: ${lastError}`);
+                return;
+            }
+
+            // 冲刷尾部残余，并标记最后一片触发落盘
+            let tailBinary = '';
+            for (let j = 0; j < sendBuf.length; j += 8192) {
+                tailBinary += String.fromCharCode.apply(null, sendBuf.subarray(j, Math.min(j + 8192, sendBuf.length)));
+            }
+            const finalData = sendBuf.length ? btoa(tailBinary) : '';
+            window.AndroidApp.writeChunk(finalData, chunkIndex === 0, true, filename);
+            showToast('🎉', `总备份已成功写入：Download/${filename}`);
+            return;
+        }
+
+        // ---- 非 APK 环境（普通浏览器）：仍走 Blob 下载 ----
         showToast('⌛', '正在压缩打包成 ZIP...');
         const blob = await zip.generateAsync({
             type: 'blob',
-            compression: 'DEFLATE',
-            compressionOptions: { level: 6 }
+            compression: 'STORE',
+            streamFiles: true
         }, (metadata) => {
             if (metadata.percent) {
                 showToast('⌛', `压缩进度: ${metadata.percent.toFixed(0)}%`);
             }
         });
 
-        const ts = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
-        const filename = `ResourceHub_Backup_${ts}.zip`;
-
-        showToast('⌛', '正在以 256KB 分片流式写入手机闪存...');
-
-        // 核心：分卷流式读写，零内存溢出！
+        // === 大文件安全导出：Blob.slice() 逐块读取，绝不一次性载入整个 ZIP ===
+        // 旧实现在此调用 blob.arrayBuffer()，会把整个 ZIP(可达数百MB) 读入内存，
+        // 叠加 base64 膨胀后必然 OOM / 卡死。现改为 1MB 切片 + 256KB 逐包刷盘。
         if (window.AndroidApp && typeof window.AndroidApp.writeChunk === 'function') {
-            const arrayBuffer = await blob.arrayBuffer();
-            const totalBytes = new Uint8Array(arrayBuffer);
-            const CHUNK_SIZE = 256 * 1024; // 严格按 256KB 切割
-            const totalChunks = Math.ceil(totalBytes.length / CHUNK_SIZE);
-
-            for (let c = 0; c < totalChunks; c++) {
-                const start = c * CHUNK_SIZE;
-                const end = Math.min(start + CHUNK_SIZE, totalBytes.length);
-                const chunkSlice = totalBytes.subarray(start, end);
-
-                let binary = '';
-                const subChunk = 8192;
-                for (let j = 0; j < chunkSlice.length; j += subChunk) {
-                    const sub = chunkSlice.subarray(j, Math.min(j + subChunk, chunkSlice.length));
-                    binary += String.fromCharCode.apply(null, sub);
+            const READ_SIZE = 1024 * 1024;        // 每次从 Blob 读 1MB
+            const SEND_SIZE = 256 * 1024;         // 每次通过桥传 256KB
+            const totalSize = blob.size;
+            let chunkIndex = 0;
+            let carry = new Uint8Array(0);
+            showToast('⌛', `开始流式导出 (${(totalSize / 1048576).toFixed(1)} MB)...`);
+            for (let offset = 0; offset < totalSize; offset += READ_SIZE) {
+                const sliceBlob = blob.slice(offset, Math.min(offset + READ_SIZE, totalSize));
+                const piece = new Uint8Array(await sliceBlob.arrayBuffer());   // 单次最多 1MB
+                let buf;
+                if (carry.length) {
+                    buf = new Uint8Array(carry.length + piece.length);
+                    buf.set(carry, 0);
+                    buf.set(piece, carry.length);
+                } else {
+                    buf = piece;
                 }
-                const base64Chunk = btoa(binary);
-
-                const ok = window.AndroidApp.writeChunk(base64Chunk, c === 0, c === totalChunks - 1, filename);
-                if (!ok) {
-                    showToast('❌', '分片写入失败，导出中止');
-                    return;
+                let pos = 0;
+                while (buf.length - pos >= SEND_SIZE) {
+                    const sub = buf.subarray(pos, pos + SEND_SIZE);
+                    let binary = '';
+                    for (let j = 0; j < sub.length; j += 8192) {
+                        binary += String.fromCharCode.apply(null, sub.subarray(j, Math.min(j + 8192, sub.length)));
+                    }
+                    const ok = window.AndroidApp.writeChunk(btoa(binary), chunkIndex === 0, false, filename);
+                    if (!ok) { showToast('❌', '分片写入失败，导出中止'); return; }
+                    chunkIndex++;
+                    pos += SEND_SIZE;
+                    if (chunkIndex % 8 === 0) {
+                        showToast('⌛', `流式刷盘: ${Math.round(Math.min(100, (offset + pos) / totalSize * 100))}%`);
+                        await new Promise(r => setTimeout(r, 0));   // 让出主线程，避免 WebView 假死
+                    }
                 }
-                if (c % 5 === 0 || c === totalChunks - 1) {
-                    showToast('⌛', `流式刷盘: ${Math.round(((c + 1) / totalChunks) * 100)}% (${c + 1}/${totalChunks})`);
-                }
+                carry = buf.subarray(pos).slice();
             }
-
+            // 冲刷最后的残余字节（标记为最后一片，触发落盘）
+            let tailBinary = '';
+            for (let j = 0; j < carry.length; j += 8192) {
+                tailBinary += String.fromCharCode.apply(null, carry.subarray(j, Math.min(j + 8192, carry.length)));
+            }
+            window.AndroidApp.writeChunk(carry.length ? btoa(tailBinary) : '', chunkIndex === 0, true, filename);
             showToast('🎉', `总备份已成功写入：Download/${filename}`);
             return;
         }
