@@ -25,18 +25,37 @@ import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.widget.Toast;
+import android.content.SharedPreferences;
+import java.io.BufferedInputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.security.MessageDigest;
+import java.util.Enumeration;
 import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
 import java.util.zip.ZipOutputStream;
+import org.json.JSONObject;
 
 public class MainActivity extends Activity {
     private WebView webView;
     private ValueCallback<Uri[]> uploadMessage;
     private final static int FILE_CHOOSER_RESULT_CODE = 10000;
+
+    // ================= 资源热更新 =================
+    // 网页资源（ui.js / tools / vendor 等）可通过远端 web_bundle.zip 热更新，
+    // 无需重装 APK。热更新包解压到 files/web/，WebView 优先加载它；
+    // 若不存在或损坏则回退到 APK 内置 assets/（保证离线可用）。
+    private static final String REMOTE_BASE = "https://tavern-card-hub.vercel.app/hotupdate";
+    private static final String VERSION_URL = REMOTE_BASE + "/web_version.json";
+    private static final String BUNDLE_URL = REMOTE_BASE + "/web_bundle.zip";
 
     @Override
     @SuppressLint("SetJavaScriptEnabled")
@@ -103,8 +122,228 @@ public class MainActivity extends Activity {
             }
         });
 
-        webView.setWebViewClient(new WebViewClient());
+        webView.setWebViewClient(new WebViewClient() {
+            @Override
+            public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                return interceptAsset(request.getUrl().toString());
+            }
+
+            @Override
+            @SuppressWarnings("deprecation")
+            public WebResourceResponse shouldInterceptRequest(WebView view, String url) {
+                return interceptAsset(url);
+            }
+        });
         webView.loadUrl("file:///android_asset/index.html");
+
+        // 启动后异步检查资源热更新（不阻塞界面，失败静默）
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try { checkAndApplyUpdate(); } catch (Exception ignored) {}
+            }
+        }).start();
+    }
+
+    // ================= 资源热更新实现 =================
+
+    /** 热更新资源的本地根目录：files/web/ */
+    private File webRoot() {
+        File dir = new File(getFilesDir(), "web");
+        if (!dir.exists()) dir.mkdirs();
+        return dir;
+    }
+
+    /**
+     * 拦截 file:///android_asset/xxx 请求：
+     * 若 files/web/xxx 存在（热更新过），优先返回它；否则返回 null 走 APK 内置资源。
+     */
+    private WebResourceResponse interceptAsset(String url) {
+        try {
+            final String prefix = "file:///android_asset/";
+            if (url == null || !url.startsWith(prefix)) return null;
+            String rel = url.substring(prefix.length());
+            int q = rel.indexOf('?');
+            if (q >= 0) rel = rel.substring(0, q);
+            File f = new File(webRoot(), rel);
+            if (f.exists() && f.isFile()) {
+                InputStream is = new BufferedInputStream(new FileInputStream(f));
+                return new WebResourceResponse(guessMime(rel), "UTF-8", is);
+            }
+        } catch (Exception ignored) {}
+        return null;
+    }
+
+    private static String guessMime(String path) {
+        String p = path.toLowerCase();
+        if (p.endsWith(".html") || p.endsWith(".htm")) return "text/html";
+        if (p.endsWith(".js") || p.endsWith(".mjs")) return "application/javascript";
+        if (p.endsWith(".css")) return "text/css";
+        if (p.endsWith(".json")) return "application/json";
+        if (p.endsWith(".png")) return "image/png";
+        if (p.endsWith(".jpg") || p.endsWith(".jpeg")) return "image/jpeg";
+        if (p.endsWith(".gif")) return "image/gif";
+        if (p.endsWith(".webp")) return "image/webp";
+        if (p.endsWith(".svg")) return "image/svg+xml";
+        if (p.endsWith(".woff")) return "font/woff";
+        if (p.endsWith(".woff2")) return "font/woff2";
+        if (p.endsWith(".ttf")) return "font/ttf";
+        if (p.endsWith(".mp3")) return "audio/mpeg";
+        if (p.endsWith(".mp4")) return "video/mp4";
+        return "application/octet-stream";
+    }
+
+    /** 读取远端 web_version.json，若 version 高于本地则下载并应用 */
+    private void checkAndApplyUpdate() {
+        HttpURLConnection conn = null;
+        try {
+            SharedPreferences sp = getSharedPreferences("hotupdate", MODE_PRIVATE);
+            long localVer = sp.getLong("web_version", 0);
+
+            URL u = new URL(VERSION_URL + "?t=" + System.currentTimeMillis());
+            conn = (HttpURLConnection) u.openConnection();
+            conn.setConnectTimeout(8000);
+            conn.setReadTimeout(8000);
+            conn.setRequestProperty("Cache-Control", "no-cache");
+            int code = conn.getResponseCode();
+            if (code != 200) return;
+            String body = readAll(conn.getInputStream());
+            JSONObject obj = new JSONObject(body);
+            long remoteVer = obj.optLong("version", 0);
+            String remoteMd5 = obj.optString("md5", "").toLowerCase();
+            if (remoteVer <= localVer) return; // 已是最新
+
+            // 下载 bundle
+            File tmpZip = new File(getCacheDir(), "web_bundle_" + remoteVer + ".zip");
+            if (!downloadTo(BUNDLE_URL + "?t=" + System.currentTimeMillis(), tmpZip)) return;
+
+            // 校验 md5
+            if (!remoteMd5.isEmpty()) {
+                String got = md5(tmpZip);
+                if (!got.equalsIgnoreCase(remoteMd5)) {
+                    tmpZip.delete();
+                    return; // 校验失败，丢弃
+                }
+            }
+
+            // 解压到临时目录，成功后原子替换
+            File staging = new File(getCacheDir(), "web_staging_" + remoteVer);
+            deleteRecursive(staging);
+            staging.mkdirs();
+            if (!unzip(tmpZip, staging)) { tmpZip.delete(); deleteRecursive(staging); return; }
+
+            // 校验必须含 index.html，否则视为坏包
+            if (!new File(staging, "index.html").exists()) {
+                tmpZip.delete(); deleteRecursive(staging); return;
+            }
+
+            // 替换 files/web/
+            File target = webRoot();
+            File backup = new File(getCacheDir(), "web_backup");
+            deleteRecursive(backup);
+            if (target.exists()) target.renameTo(backup);
+            if (staging.renameTo(target)) {
+                sp.edit().putLong("web_version", remoteVer).apply();
+                deleteRecursive(backup);
+            } else {
+                // 替换失败，回滚
+                if (backup.exists()) backup.renameTo(target);
+            }
+            tmpZip.delete();
+            deleteRecursive(staging);
+        } catch (Exception ignored) {
+            // 静默失败，保持旧版
+        } finally {
+            if (conn != null) try { conn.disconnect(); } catch (Exception ignored) {}
+        }
+    }
+
+    private static String readAll(InputStream is) throws Exception {
+        java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+        byte[] buf = new byte[8192];
+        int n;
+        while ((n = is.read(buf)) != -1) bos.write(buf, 0, n);
+        is.close();
+        return new String(bos.toByteArray(), "UTF-8");
+    }
+
+    private static boolean downloadTo(String urlStr, File dest) {
+        HttpURLConnection c = null;
+        try {
+            URL u = new URL(urlStr);
+            c = (HttpURLConnection) u.openConnection();
+            c.setConnectTimeout(15000);
+            c.setReadTimeout(30000);
+            c.setRequestProperty("Cache-Control", "no-cache");
+            if (c.getResponseCode() != 200) return false;
+            InputStream is = new BufferedInputStream(c.getInputStream());
+            FileOutputStream fos = new FileOutputStream(dest);
+            byte[] buf = new byte[65536];
+            int n;
+            while ((n = is.read(buf)) != -1) fos.write(buf, 0, n);
+            fos.flush();
+            fos.close();
+            is.close();
+            return true;
+        } catch (Exception e) {
+            return false;
+        } finally {
+            if (c != null) try { c.disconnect(); } catch (Exception ignored) {}
+        }
+    }
+
+    private static String md5(File f) throws Exception {
+        MessageDigest md = MessageDigest.getInstance("MD5");
+        FileInputStream fis = new FileInputStream(f);
+        byte[] buf = new byte[65536];
+        int n;
+        while ((n = fis.read(buf)) != -1) md.update(buf, 0, n);
+        fis.close();
+        StringBuilder sb = new StringBuilder();
+        for (byte b : md.digest()) sb.append(String.format("%02x", b));
+        return sb.toString();
+    }
+
+    private static boolean unzip(File zip, File outDir) {
+        ZipFile zf = null;
+        try {
+            zf = new ZipFile(zip);
+            Enumeration<? extends ZipEntry> en = zf.entries();
+            while (en.hasMoreElements()) {
+                ZipEntry e = en.nextElement();
+                String name = e.getName();
+                if (name.contains("..")) continue; // 防路径穿越
+                File out = new File(outDir, name);
+                if (e.isDirectory()) {
+                    out.mkdirs();
+                    continue;
+                }
+                File parent = out.getParentFile();
+                if (parent != null && !parent.exists()) parent.mkdirs();
+                InputStream is = zf.getInputStream(e);
+                FileOutputStream fos = new FileOutputStream(out);
+                byte[] buf = new byte[65536];
+                int n;
+                while ((n = is.read(buf)) != -1) fos.write(buf, 0, n);
+                fos.flush();
+                fos.close();
+                is.close();
+            }
+            return true;
+        } catch (Exception e) {
+            return false;
+        } finally {
+            if (zf != null) try { zf.close(); } catch (Exception ignored) {}
+        }
+    }
+
+    private static void deleteRecursive(File f) {
+        if (f == null || !f.exists()) return;
+        if (f.isDirectory()) {
+            File[] kids = f.listFiles();
+            if (kids != null) for (File k : kids) deleteRecursive(k);
+        }
+        f.delete();
     }
 
     @Override
