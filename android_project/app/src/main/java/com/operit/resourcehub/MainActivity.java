@@ -57,6 +57,47 @@ public class MainActivity extends Activity {
     private static final String VERSION_URL = REMOTE_BASE + "/web_version.json";
     private static final String BUNDLE_URL = REMOTE_BASE + "/web_bundle.zip";
 
+    // ================= 下载劫持脚本 =================
+    // WebView 不处理 a.download / blob: 下载，导致点击「导出/下载」静默失败。
+    // 注入脚本：接管 <a download> 与 Blob/data: 下载，转 base64 分片交原生写盘。
+    private static final String DOWNLOAD_HOOK_JS =
+        "(function(){" +
+        "if(window.__dlHooked)return;window.__dlHooked=true;" +
+        "function toB64(buf){var b=new Uint8Array(buf),s='',C=0x8000;for(var i=0;i<b.length;i+=C){s+=String.fromCharCode.apply(null,b.subarray(i,i+C));}return btoa(s);}" +
+        "function save(blob,name){" +
+        "if(!window.AndroidApp||!window.AndroidApp.saveBlobChunk)return false;" +
+        "var r=new FileReader();" +
+        "r.onload=function(){try{var b64=toB64(r.result);var CH=512*1024;var i=0;var first=true;" +
+        "function step(){var c=b64.slice(i,i+CH);i+=CH;var last=(i>=b64.length);" +
+        "window.AndroidApp.saveBlobChunk(c,first,last,name);first=false;if(!last)setTimeout(step,0);}" +
+        "step();}catch(e){try{window.AndroidApp.showToast('下载失败:'+e.message);}catch(_){}}};" +
+        "r.onerror=function(){try{window.AndroidApp.showToast('读取失败');}catch(_){}};" +
+        "r.readAsArrayBuffer(blob);return true;}" +
+        "window.__blobMap=window.__blobMap||{};" +
+        "var oc=URL.createObjectURL;" +
+        "URL.createObjectURL=function(o){var u=oc.call(URL,o);try{if(o instanceof Blob){window.__blobMap[u]=o;}}catch(e){}return u;};" +
+        "var oc2=HTMLAnchorElement.prototype.click;" +
+        "HTMLAnchorElement.prototype.click=function(){" +
+        "try{var href=this.getAttribute('href')||'';var name=this.getAttribute('download')||('download_'+Date.now());" +
+        "if(href.indexOf('blob:')===0){var b=window.__blobMap[href];if(b&&save(b,name)){return;}}" +
+        "else if(href.indexOf('data:')===0){var idx=href.indexOf(',');var b64=href.slice(idx+1);" +
+        "var CH=512*1024;var i=0;var first=true;" +
+        "function st(){var c=b64.slice(i,i+CH);i+=CH;var last=(i>=b64.length);" +
+        "window.AndroidApp.saveBlobChunk(c,first,last,name);first=false;if(!last)setTimeout(st,0);}" +
+        "st();return;}}catch(e){}" +
+        "return oc2.apply(this,arguments);};" +
+        "document.addEventListener('click',function(ev){" +
+        "var a=ev.target&&ev.target.closest?ev.target.closest('a[download]'):null;if(!a)return;" +
+        "var href=a.getAttribute('href')||'';var name=a.getAttribute('download')||('download_'+Date.now());" +
+        "try{if(href.indexOf('blob:')===0){var b=window.__blobMap[href];" +
+        "if(b&&save(b,name)){ev.preventDefault();ev.stopPropagation();return;}}" +
+        "else if(href.indexOf('data:')===0){var idx=href.indexOf(',');var b64=href.slice(idx+1);" +
+        "var CH=512*1024;var i=0;var first=true;" +
+        "function st(){var c=b64.slice(i,i+CH);i+=CH;var last=(i>=b64.length);" +
+        "window.AndroidApp.saveBlobChunk(c,first,last,name);first=false;if(!last)setTimeout(st,0);}" +
+        "st();ev.preventDefault();ev.stopPropagation();return;}}catch(e){}" +
+        "},true);})();";
+
     @Override
     @SuppressLint("SetJavaScriptEnabled")
     protected void onCreate(Bundle savedInstanceState) {
@@ -133,6 +174,32 @@ public class MainActivity extends Activity {
             public WebResourceResponse shouldInterceptRequest(WebView view, String url) {
                 return interceptAsset(url);
             }
+
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                super.onPageFinished(view, url);
+                // 注入下载劫持脚本（脚本内部会持续扫描并覆盖所有同源 iframe）
+                String js = getHookJs();
+                android.util.Log.i("RH_DL", "onPageFinished url=" + url + " hookLen=" + js.length());
+                view.evaluateJavascript(js, null);
+            }
+        });
+
+        // WebView 默认不处理 blob: 下载，导致「点了没反应」。此监听兜底 http(s) 直链。
+        webView.setDownloadListener(new android.webkit.DownloadListener() {
+            @Override
+            public void onDownloadStart(String url, String userAgent, String contentDisposition,
+                                        String mimeType, long contentLength) {
+                if (url != null && (url.startsWith("http://") || url.startsWith("https://"))) {
+                    try {
+                        Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+                        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        startActivity(i);
+                    } catch (Exception e) {
+                        Toast.makeText(MainActivity.this, "无法打开下载: " + e.getMessage(), Toast.LENGTH_SHORT).show();
+                    }
+                }
+            }
         });
         webView.loadUrl("file:///android_asset/index.html");
 
@@ -143,6 +210,21 @@ public class MainActivity extends Activity {
                 try { checkAndApplyUpdate(); } catch (Exception ignored) {}
             }
         }).start();
+    }
+
+    // 从 assets 读取下载劫持脚本（比 Java 内联字符串更易维护）
+    private String getHookJs() {
+        try {
+            java.io.InputStream is = getAssets().open("download_hook.js");
+            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = is.read(buf)) != -1) bos.write(buf, 0, n);
+            is.close();
+            return new String(bos.toByteArray(), "UTF-8");
+        } catch (Exception e) {
+            return DOWNLOAD_HOOK_JS;
+        }
     }
 
     // ================= 资源热更新实现 =================
@@ -538,6 +620,54 @@ public class MainActivity extends Activity {
                     try { currentFos.close(); } catch (Exception ignored) {}
                     currentFos = null;
                 }
+                return false;
+            }
+        }
+        // ================= Blob 分片下载（供页面下载劫持脚本调用） =================
+        private File blobTempFile = null;
+        private FileOutputStream blobFos = null;
+        private String blobName = null;
+
+        @JavascriptInterface
+        public synchronized boolean saveBlobChunk(String chunkBase64, boolean isFirst, boolean isLast, String filename) {
+            try {
+                if (isFirst) {
+                    if (blobFos != null) { try { blobFos.close(); } catch (Exception ignored) {} }
+                    File cacheDir = context.getCacheDir();
+                    blobTempFile = new File(cacheDir, "dl_" + System.currentTimeMillis() + ".tmp");
+                    if (blobTempFile.exists()) blobTempFile.delete();
+                    blobFos = new FileOutputStream(blobTempFile, true);
+                    blobName = (filename != null && !filename.isEmpty()) ? filename : ("download_" + System.currentTimeMillis());
+                }
+                if (chunkBase64 != null && !chunkBase64.isEmpty()) {
+                    String clean = chunkBase64.contains(",") ? chunkBase64.substring(chunkBase64.indexOf(",") + 1) : chunkBase64;
+                    byte[] bytes = Base64.decode(clean, Base64.DEFAULT);
+                    if (blobFos != null) { blobFos.write(bytes); blobFos.flush(); }
+                }
+                if (isLast) {
+                    if (blobFos != null) { blobFos.close(); blobFos = null; }
+                    if (blobTempFile != null && blobTempFile.exists()) {
+                        final File src = blobTempFile;
+                        final String outName = blobName;
+                        new Thread(new Runnable() {
+                            @Override
+                            public void run() {
+                                try {
+                                    saveFileToPublicDownload(src, outName, guessMime(outName));
+                                    src.delete();
+                                    postToast("✅ 已保存到 Download/" + outName);
+                                } catch (Exception e) {
+                                    postToast("❌ 保存失败: " + e.getMessage());
+                                }
+                            }
+                        }).start();
+                        blobTempFile = null;
+                    }
+                }
+                return true;
+            } catch (Exception e) {
+                postToast("❌ 下载分片失败: " + e.getMessage());
+                if (blobFos != null) { try { blobFos.close(); } catch (Exception ignored) {} blobFos = null; }
                 return false;
             }
         }
