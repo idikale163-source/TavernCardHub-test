@@ -435,14 +435,19 @@ public class MainActivity extends Activity {
             if (uploadMessage == null) return;
             Uri[] results = null;
             if (resultCode == RESULT_OK && intent != null) {
-                String dataString = intent.getDataString();
-                if (dataString != null) {
-                    results = new Uri[]{Uri.parse(dataString)};
-                } else if (intent.getClipData() != null) {
-                    int count = intent.getClipData().getItemCount();
+                // 先取 ClipData：部分 OEM（如 vivo）多选时仍会填充 intent.data，
+                // 若先判断 dataString 会导致多选被截断成单个文件。
+                ClipData clip = intent.getClipData();
+                if (clip != null && clip.getItemCount() > 0) {
+                    int count = clip.getItemCount();
                     results = new Uri[count];
                     for (int i = 0; i < count; i++) {
-                        results[i] = intent.getClipData().getItemAt(i).getUri();
+                        results[i] = clip.getItemAt(i).getUri();
+                    }
+                } else {
+                    String dataString = intent.getDataString();
+                    if (dataString != null) {
+                        results = new Uri[]{Uri.parse(dataString)};
                     }
                 }
             }
